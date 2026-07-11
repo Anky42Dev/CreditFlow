@@ -37,6 +37,11 @@ def disburse_loan(application) -> Loan:
     )
     application.status = "DISBURSED"
     application.save(update_fields=["status"])
+
+    from apps.notifications.services import notify_user
+
+    notify_user(loan.user, "loan.disbursed", loan)
+
     return loan
 
 

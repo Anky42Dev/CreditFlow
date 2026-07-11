@@ -68,3 +68,21 @@ class ScoringResult(models.Model):
 
     def __str__(self):
         return f"Scoring<{self.application_id}> {self.decision}"
+
+
+class Document(models.Model):
+    """Doc 3 §3.6: a document attached to an application (income proof, ID, ...).
+    Uploaded/reviewed via the Этап 7 admin API; no client-facing upload endpoint yet."""
+
+    application = models.ForeignKey(
+        CreditApplication, on_delete=models.CASCADE, related_name="documents", db_index=True
+    )
+    file = models.FileField(upload_to="documents/")
+    doc_type = models.CharField(max_length=40)
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "documents"
+
+    def __str__(self):
+        return f"Document<{self.application_id}> {self.doc_type}"

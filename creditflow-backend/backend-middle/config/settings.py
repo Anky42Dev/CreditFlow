@@ -5,6 +5,7 @@ Django settings for config project (CreditFlow — Backend Middle).
 from datetime import timedelta
 from pathlib import Path
 
+from celery.schedules import crontab
 from decouple import Csv, config
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -39,6 +40,8 @@ INSTALLED_APPS = [
     "apps.applications",
     "apps.lending",
     "apps.realtime",
+    "apps.notifications",
+    "apps.adminpanel",
 ]
 
 MIDDLEWARE = [
@@ -119,6 +122,22 @@ CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
 CELERY_TIMEZONE = "UTC"
+
+# Celery Beat — periodic tasks (DOC 3 §12, Этап 6)
+CELERY_BEAT_SCHEDULE = {
+    "check-overdue-payments": {
+        "task": "apps.lending.tasks.mark_overdue_payments",
+        "schedule": crontab(hour=1, minute=0),
+    },
+    "payment-due-reminders": {
+        "task": "apps.notifications.tasks.send_due_reminders",
+        "schedule": crontab(hour=9, minute=0),
+    },
+}
+
+# Email (DOC 3 §11). Console backend for dev; swap via env in production.
+EMAIL_BACKEND = config("EMAIL_BACKEND", default="django.core.mail.backends.console.EmailBackend")
+DEFAULT_FROM_EMAIL = config("DEFAULT_FROM_EMAIL", default="noreply@creditflow.local")
 
 
 # Password validation

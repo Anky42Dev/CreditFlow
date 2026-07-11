@@ -1,12 +1,19 @@
 from rest_framework import serializers
 
-from .models import CreditApplication, ScoringResult
+from .models import CreditApplication, Document, ScoringResult
 
 
 class ScoringResultSerializer(serializers.ModelSerializer):
     class Meta:
         model = ScoringResult
         fields = ["score", "decision", "reason", "created_at"]
+        read_only_fields = fields
+
+
+class DocumentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Document
+        fields = ["id", "doc_type", "file", "uploaded_at"]
         read_only_fields = fields
 
 

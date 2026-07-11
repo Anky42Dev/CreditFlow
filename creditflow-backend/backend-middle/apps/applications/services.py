@@ -72,8 +72,9 @@ def compute_score(application: CreditApplication) -> int:
 def perform_scoring(application_id) -> CreditApplication:
     """Doc 3 §6.3. Этап 4 wires disburse_loan on APPROVED; push_status (Этап 5)
     notifies the applicant's WS group after each status change. notify_user
-    (email + in-app Notification) remains for Этап 6 — that model doesn't exist yet."""
+    (email + in-app Notification) is wired here from Этап 6."""
     from apps.realtime.push import push_status
+    from apps.notifications.services import notify_user
 
     application = CreditApplication.objects.select_related("user__profile").get(id=application_id)
     application.status = "SCORING"
@@ -95,10 +96,61 @@ def perform_scoring(application_id) -> CreditApplication:
     application.status = decision
     application.save(update_fields=["status"])
     push_status(application)
+    notify_user(application.user, f"application.{decision.lower()}", application)
 
     if decision == "APPROVED":
         from apps.lending.services import disburse_loan
 
         disburse_loan(application)
 
+    return application
+
+
+def approve_application(application: CreditApplication, comment: str = "") -> CreditApplication:
+    """Doc 3 §10: admin/underwriter approval — only a MANUAL_REVIEW application can
+    be approved this way. Mirrors perform_scoring's APPROVED branch: flips the
+    application to APPROVED, then disburse_loan (already idempotent) takes it to
+    DISBURSED and builds the payment schedule.
+    TODO(Этап 8): record actor + comment in AuditLog once that model exists.
+    """
+    from apps.lending.services import disburse_loan
+    from apps.notifications.services import notify_user
+    from apps.realtime.push import push_status
+
+    if application.status != "MANUAL_REVIEW":
+        raise ConflictError(message="Only MANUAL_REVIEW applications can be approved")
+
+    application.status = "APPROVED"
+    application.save(update_fields=["status"])
+    push_status(application)
+    notify_user(application.user, "application.approved", application)
+
+    disburse_loan(application)
+    return application
+
+
+def reject_application(application: CreditApplication, reason: str = "") -> CreditApplication:
+    """Doc 3 §10: admin/underwriter rejection of a MANUAL_REVIEW application.
+    TODO(Этап 8): record actor + reason in AuditLog once that model exists.
+    """
+    from apps.notifications.services import notify_user
+    from apps.realtime.push import push_status
+
+    if application.status != "MANUAL_REVIEW":
+        raise ConflictError(message="Only MANUAL_REVIEW applications can be rejected")
+
+    application.status = "REJECTED"
+    application.save(update_fields=["status"])
+    push_status(application)
+    notify_user(application.user, "application.rejected", application)
+    return application
+
+
+def request_documents(application: CreditApplication) -> CreditApplication:
+    """Doc 3 §10: asks the client for supporting documents. There's no dedicated
+    state in the application's status machine for this yet, so it's a
+    notification-only action — the application's status is left untouched."""
+    from apps.notifications.services import notify_user
+
+    notify_user(application.user, "application.documents_requested", application)
     return application
