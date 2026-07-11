@@ -10,6 +10,7 @@ django-redis==5.4.0
 djangorestframework==3.17.1
 djangorestframework_simplejwt==5.5.1
 drf-spectacular==0.30.0
+pillow==12.3.0
 inflection==0.5.1
 jsonschema==4.26.0
 jsonschema-specifications==2025.9.1
