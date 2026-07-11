@@ -1,0 +1,649 @@
+diff --git a/creditflow-backend/backend-middle/.coveragerc b/creditflow-backend/backend-middle/.coveragerc
+new file mode 100644
+index 0000000..4a6e6c0
+--- /dev/null
++++ b/creditflow-backend/backend-middle/.coveragerc
+@@ -0,0 +1,19 @@
++[run]
++source = .
++omit =
++    */migrations/*
++    */tests*
++    */test_*
++    manage.py
++    config/asgi.py
++    config/wsgi.py
++    config/celery.py
++    */venv/*
++    */.venv/*
++    */site-packages/*
++
++[report]
++exclude_lines =
++    pragma: no cover
++    raise NotImplementedError
++    if __name__ == .__main__.:
+diff --git a/creditflow-backend/backend-middle/.github/workflows/backend-middle.yml b/creditflow-backend/backend-middle/.github/workflows/backend-middle.yml
+new file mode 100644
+index 0000000..60bf64c
+--- /dev/null
++++ b/creditflow-backend/backend-middle/.github/workflows/backend-middle.yml
+@@ -0,0 +1,131 @@
++name: backend-middle CI/CD
++
++on:
++  push:
++    branches: [main, develop]
++    paths:
++      - "creditflow-backend/backend-middle/**"
++      - ".github/workflows/backend-middle.yml"
++  pull_request:
++    branches: [main, develop]
++    paths:
++      - "creditflow-backend/backend-middle/**"
++
++defaults:
++  run:
++    working-directory: creditflow-backend/backend-middle
++
++env:
++  PYTHON_VERSION: "3.12"  # ASSUMPTION: сверить с реальной версией в Dockerfile
++
++jobs:
++  lint:
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++
++      - uses: actions/setup-python@v5
++        with:
++          python-version: ${{ env.PYTHON_VERSION }}
++          cache: "pip"
++          cache-dependency-path: creditflow-backend/backend-middle/requirements-dev.txt
++
++      - run: pip install -r requirements-dev.txt
++      - run: ruff check .
++      - run: black --check .
++
++  test:
++    needs: lint
++    runs-on: ubuntu-latest
++
++    services:
++      postgres:
++        image: postgres:16
++        env:
++          POSTGRES_USER: creditflow
++          POSTGRES_PASSWORD: creditflow
++          POSTGRES_DB: creditflow_test
++        ports:
++          - 5432:5432
++        options: >-
++          --health-cmd "pg_isready -U creditflow"
++          --health-interval 10s
++          --health-timeout 5s
++          --health-retries 5
++
++      redis:
++        image: redis:7
++        ports:
++          - 6379:6379
++        options: >-
++          --health-cmd "redis-cli ping"
++          --health-interval 10s
++          --health-timeout 5s
++          --health-retries 5
++
++    # Переменные ниже соответствуют реальным config("...") вызовам в config/settings.py,
++    # НЕ единой DATABASE_URL — settings.py читает DB_NAME/DB_USER/DB_PASSWORD/DB_HOST/DB_PORT
++    # по отдельности через python-decouple.
++    env:
++      SECRET_KEY: ci-test-secret-key
++      DEBUG: "False"
++      ALLOWED_HOSTS: "localhost,127.0.0.1"
++      DB_NAME: creditflow_test
++      DB_USER: creditflow
++      DB_PASSWORD: creditflow
++      DB_HOST: localhost
++      DB_PORT: "5432"
++      REDIS_URL: redis://localhost:6379/1
++      CHANNEL_LAYERS_REDIS_URL: redis://localhost:6379/2
++      CELERY_BROKER_URL: redis://localhost:6379/0
++      CELERY_RESULT_BACKEND: redis://localhost:6379/0
++
++    steps:
++      - uses: actions/checkout@v4
++
++      - uses: actions/setup-python@v5
++        with:
++          python-version: ${{ env.PYTHON_VERSION }}
++          cache: "pip"
++          cache-dependency-path: creditflow-backend/backend-middle/requirements-dev.txt
++
++      - run: pip install -r requirements-dev.txt
++      - run: python manage.py migrate --noinput
++      - run: pytest --cov --cov-report=xml --cov-fail-under=70
++
++      - uses: actions/upload-artifact@v4
++        with:
++          name: coverage-report
++          path: creditflow-backend/backend-middle/coverage.xml
++
++  build:
++    needs: test
++    runs-on: ubuntu-latest
++    if: github.event_name == 'push'
++    steps:
++      - uses: actions/checkout@v4
++      - uses: docker/setup-buildx-action@v3
++      - uses: docker/build-push-action@v5
++        with:
++          context: creditflow-backend/backend-middle
++          push: false
++          tags: creditflow-backend-middle:${{ github.sha }}
++          cache-from: type=gha
++          cache-to: type=gha,mode=max
++
++  deploy:
++    needs: build
++    runs-on: ubuntu-latest
++    if: github.ref == 'refs/heads/main'
++    environment:
++      name: production
++      # Reviewer, настроенный на этом Environment в настройках репозитория,
++      # даёт manual approval перед запуском job.
++    steps:
++      - uses: actions/checkout@v4
++      - name: Deploy via docker compose
++        # ASSUMPTION: способ деплоя (SSH/self-hosted runner/registry) не был описан — заглушка.
++        run: |
++          echo "docker compose pull && docker compose up -d"
++          echo "docker compose exec -T backend-middle python manage.py migrate --noinput"
++          echo "docker compose exec -T backend-middle python manage.py collectstatic --noinput"
+diff --git a/creditflow-backend/backend-middle/apps/applications/tests_e2e.py b/creditflow-backend/backend-middle/apps/applications/tests_e2e.py
+new file mode 100644
+index 0000000..667c7cb
+--- /dev/null
++++ b/creditflow-backend/backend-middle/apps/applications/tests_e2e.py
+@@ -0,0 +1,170 @@
++"""
++E2E: создание заявки -> submit -> скоринг (MANUAL_REVIEW) -> одобрение андеррайтером ->
++выдача (авто через approve_application->disburse_loan) -> погашение,
++с проверкой WebSocket-событий на каждом шаге.
++
++ВАЖНО — два реальных ограничения текущего кода, из-за которых сценарий не 1:1 с ТЗ:
++
++1. config/urls.py не подключает apps.accounts.urls вообще — HTTP register/login
++   эндпоинтов нет. Шаги "регистрация"/"логин" из ТЗ Промпта №5.1 пока физически
++   невозможны через API. Тест-заглушка ниже помечен skip с этой причиной; когда
++   auth API (блокер №1, Этап 0) будет реализован и подключён в urls.py, замените
++   fixture user/jwt_token_factory на реальные HTTP-вызовы и снимите skip.
++2. apps/lending/services.py::repay() НЕ вызывает push_status/notify_user —
++   значит после погашения сейчас не летит НИКАКОЕ WS-событие. Это не баг теста:
++   я явно проверил код repay() и там нет push. test_ws_event_fires_on_repay ниже
++   помечен xfail(strict=True) с этой причиной — он должен начать проходить сам,
++   как только в repay() добавят push_status(loan.application) или аналог, и
++   тогда его нужно будет "разксфейлить".
++
++Остальные шаги (submit, скоринг, одобрение андеррайтером, выдача, WS-события на
++статусах заявки, погашение как API-вызов) — рабочие и based on фактическом коде.
++"""
++from decimal import Decimal
++
++import pytest
++from channels.testing import WebsocketCommunicator
++from rest_framework import status
++from rest_framework.test import APIClient
++
++from apps.applications.models import CreditApplication
++from apps.applications.services import calc_annuity
++from apps.lending.models import Loan
++from config.asgi import application as asgi_application  # ASSUMPTION: имя ASGI-приложения, сверить
++
++pytestmark = pytest.mark.django_db
++
++APPLICATIONS_URL = "/api/v1/credit-applications"
++
++
++@pytest.mark.skip(
++    reason=(
++        "auth API (регистрация/логин) не подключены в config/urls.py — "
++        "apps.accounts.urls отсутствует в include(). Заблокировано Этапом 0 "
++        "(item 0 из мастер-спеки), не относится к Этапу 9."
++    )
++)
++def test_e2e_registration_and_login_via_http():
++    ...
++
++
++@pytest.mark.asyncio
++async def test_e2e_manual_review_to_disbursement_with_ws_events(
++    client_authed, underwriter_client, user, underwriter_user, product, celery_eager, jwt_token_factory
++):
++    from asgiref.sync import sync_to_async
++
++    amount, term_months = Decimal("200000.00"), 12
++
++    # profile.monthly_income подобран так, чтобы ratio ~0.3 -> MANUAL_REVIEW
++    # (см. apps/applications/services.py::compute_score)
++    monthly_payment = calc_annuity(amount, product.interest_rate, term_months)
++    await sync_to_async(_set_income)(user, monthly_payment, Decimal("0.3"))
++
++    ws_token = jwt_token_factory(user)
++    communicator = WebsocketCommunicator(asgi_application, f"/ws/notifications/?token={ws_token}")  # ASSUMPTION: маршрут WS
++    connected, _ = await communicator.connect()
++    assert connected, "WS-соединение не установлено — сверить apps/realtime/routing.py и JWTAuthMiddleware"
++
++    # --- создание заявки ---
++    resp = await sync_to_async(client_authed.post)(
++        APPLICATIONS_URL,
++        {"product": product.id, "amount": str(amount), "term_months": term_months},
++        format="json",
++    )
++    assert resp.status_code == status.HTTP_201_CREATED, resp.content
++    application_id = resp.json()["id"]
++
++    # --- submit ---
++    resp = await sync_to_async(client_authed.post)(f"{APPLICATIONS_URL}/{application_id}/submit")
++    assert resp.status_code in (status.HTTP_200_OK, status.HTTP_202_ACCEPTED), resp.content
++
++    # perform_scoring: push_status(SCORING) -> push_status(MANUAL_REVIEW) -> notify_user(...)
++    ev_scoring = await communicator.receive_json_from(timeout=5)
++    assert ev_scoring == {"event": "application_status", "application_id": application_id, "status": "SCORING"}
++
++    ev_status = await communicator.receive_json_from(timeout=5)
++    assert ev_status == {
++        "event": "application_status",
++        "application_id": application_id,
++        "status": "MANUAL_REVIEW",
++    }
++
++    ev_notification = await communicator.receive_json_from(timeout=5)
++    assert ev_notification["event"] == "notification"  # уведомление application.manual_review от notify_user
++
++    app_obj = await sync_to_async(CreditApplication.objects.get)(id=application_id)
++    assert app_obj.status == "MANUAL_REVIEW"
++
++    # --- одобрение андеррайтером (approve_application) ---
++    resp = await sync_to_async(underwriter_client.post)(
++        f"/api/v1/admin/applications/{application_id}/approve", {"comment": "ok"}
++    )
++    assert resp.status_code == status.HTTP_200_OK, resp.content
++
++    # approve_application: push_status(APPROVED) -> notify_user(...) -> disburse_loan -> notify_user(loan.disbursed)
++    ev_approved = await communicator.receive_json_from(timeout=5)
++    assert ev_approved == {"event": "application_status", "application_id": application_id, "status": "APPROVED"}
++
++    ev_approved_notification = await communicator.receive_json_from(timeout=5)
++    assert ev_approved_notification["event"] == "notification"
++
++    ev_disbursed_notification = await communicator.receive_json_from(timeout=5)
++    assert ev_disbursed_notification["event"] == "notification"
++
++    app_obj = await sync_to_async(CreditApplication.objects.get)(id=application_id)
++    assert app_obj.status == "DISBURSED"
++    loan = await sync_to_async(lambda: Loan.objects.get(application=app_obj))()
++
++    await communicator.disconnect()
++
++
++@pytest.mark.xfail(
++    strict=True,
++    reason=(
++        "apps/lending/services.py::repay() не вызывает push_status ни notify_user — "
++        "WS/уведомление о погашении сейчас не отправляется. Тест должен начать "
++        "проходить, когда эту нотификацию добавят в repay()."
++    ),
++)
++@pytest.mark.asyncio
++async def test_ws_event_fires_on_repay(client_authed, user, product, celery_eager, jwt_token_factory):
++    from asgiref.sync import sync_to_async
++
++    amount, term_months = Decimal("200000.00"), 12
++    monthly_payment = calc_annuity(amount, product.interest_rate, term_months)
++    await sync_to_async(_set_income)(user, monthly_payment, Decimal("0.15"))  # -> APPROVED -> авто-выдача
++
++    ws_token = jwt_token_factory(user)
++    communicator = WebsocketCommunicator(asgi_application, f"/ws/notifications/?token={ws_token}")
++    await communicator.connect()
++
++    resp = await sync_to_async(client_authed.post)(
++        APPLICATIONS_URL, {"product": product.id, "amount": str(amount), "term_months": term_months}, format="json"
++    )
++    application_id = resp.json()["id"]
++    await sync_to_async(client_authed.post)(f"{APPLICATIONS_URL}/{application_id}/submit")
++
++    # осушаем события скоринга/выдачи, нас интересует только событие после repay
++    for _ in range(4):
++        await communicator.receive_json_from(timeout=5)
++
++    app_obj = await sync_to_async(CreditApplication.objects.get)(id=application_id)
++    loan = await sync_to_async(lambda: Loan.objects.get(application=app_obj))()
++
++    resp = await sync_to_async(client_authed.post)(
++        f"/api/v1/loans/{loan.id}/repay",
++        {"amount": str(monthly_payment), "idempotency_key": "e2e-repay-key"},
++    )
++    assert resp.status_code == status.HTTP_200_OK, resp.content
++
++    # ЭТО должно прилететь, но сейчас не летит — см. reason у xfail выше
++    event = await communicator.receive_json_from(timeout=5)
++    assert event["event"] in ("notification", "application_status")
++
++    await communicator.disconnect()
++
++
++def _set_income(user, monthly_payment, ratio):
++    user.profile.monthly_income = (monthly_payment / ratio).quantize(Decimal("0.01"))
++    user.profile.save()
+diff --git a/creditflow-backend/backend-middle/apps/applications/tests_integration.py b/creditflow-backend/backend-middle/apps/applications/tests_integration.py
+new file mode 100644
+index 0000000..e6e681d
+--- /dev/null
++++ b/creditflow-backend/backend-middle/apps/applications/tests_integration.py
+@@ -0,0 +1,134 @@
++"""
++Интеграционные тесты флоу заявки: submit -> scoring -> APPROVED/MANUAL_REVIEW/REJECTED
++-> (если одобрено) Loan + PaymentScheduleItem.
++
++Построено на реальных apps/applications/services.py (submit_application, perform_scoring,
++calc_annuity, compute_score), apps/applications/urls.py (basename "credit-application",
++эндпоинт /api/v1/credit-applications), apps/lending/services.py (disburse_loan).
++
++compute_score детерминирован (см. apps/applications/services.py::compute_score), поэтому
++исход скоринга контролируется через profile.monthly_income относительно monthly_payment,
++а не через мок скорингового движка:
++  ratio = monthly_payment / monthly_income
++  ratio < 0.2        -> score 800 -> APPROVED
++  0.2 <= ratio < 0.4  -> score 600 -> MANUAL_REVIEW
++  ratio >= 0.4        -> score 300 -> REJECTED
++
++ASSUMPTION (views.py не был доступен): имя action'а submit на CreditApplicationViewSet —
++"submit", итоговый путь /api/v1/credit-applications/{id}/submit. Сверить, если тест падает
++с 404 на этом шаге.
++"""
++from decimal import Decimal
++
++import pytest
++from rest_framework import status
++
++from apps.applications.models import CreditApplication, ScoringResult
++from apps.applications.services import calc_annuity
++from apps.lending.models import Loan, PaymentScheduleItem
++
++pytestmark = pytest.mark.django_db
++
++APPLICATIONS_URL = "/api/v1/credit-applications"  # без слэша — router(trailing_slash=False)
++
++
++def _set_income_for_ratio(user, product, amount, term_months, ratio):
++    """Подбирает profile.monthly_income так, чтобы monthly_payment/monthly_income == ratio."""
++    monthly_payment = calc_annuity(amount, product.interest_rate, term_months)
++    user.profile.monthly_income = (monthly_payment / Decimal(str(ratio))).quantize(Decimal("0.01"))
++    user.profile.save()
++    return monthly_payment
++
++
++def _create_application(client_authed, product, amount, term_months):
++    resp = client_authed.post(
++        APPLICATIONS_URL,
++        {"product": product.id, "amount": str(amount), "term_months": term_months},
++        format="json",
++    )
++    assert resp.status_code == status.HTTP_201_CREATED, resp.content
++    return resp.json()
++
++
++def _submit(client_authed, application_id):
++    resp = client_authed.post(f"{APPLICATIONS_URL}/{application_id}/submit")
++    assert resp.status_code in (status.HTTP_200_OK, status.HTTP_202_ACCEPTED), resp.content
++    return resp
++
++
++class TestFullApprovalFlow:
++    def test_auto_approved_flow_creates_loan_and_full_schedule(self, client_authed, user, product, celery_eager):
++        amount, term_months = Decimal("200000.00"), 12
++        _set_income_for_ratio(user, product, amount, term_months, ratio="0.15")  # -> APPROVED
++
++        created = _create_application(client_authed, product, amount, term_months)
++        application_id = created["id"]
++
++        app_obj = CreditApplication.objects.get(id=application_id)
++        assert app_obj.status == "DRAFT"
++
++        _submit(client_authed, application_id)
++
++        app_obj.refresh_from_db()
++        scoring = ScoringResult.objects.get(application=app_obj)
++        assert scoring.decision == "APPROVED"
++        # perform_scoring вызывает disburse_loan прямо при APPROVED -> статус уходит в DISBURSED
++        assert app_obj.status == "DISBURSED"
++
++        loan = Loan.objects.get(application=app_obj)
++        assert loan.status == "ACTIVE"
++        assert loan.outstanding_balance == amount
++        schedule_count = PaymentScheduleItem.objects.filter(loan=loan).count()
++        assert schedule_count == term_months
++
++    def test_manual_review_does_not_create_loan_until_approved(self, client_authed, user, product, celery_eager):
++        amount, term_months = Decimal("200000.00"), 12
++        _set_income_for_ratio(user, product, amount, term_months, ratio="0.3")  # -> MANUAL_REVIEW
++
++        created = _create_application(client_authed, product, amount, term_months)
++        application_id = created["id"]
++        _submit(client_authed, application_id)
++
++        app_obj = CreditApplication.objects.get(id=application_id)
++        assert app_obj.status == "MANUAL_REVIEW"
++        assert ScoringResult.objects.get(application=app_obj).decision == "MANUAL_REVIEW"
++        assert not Loan.objects.filter(application=app_obj).exists()
++
++    def test_rejected_flow_no_loan(self, client_authed, user, product, celery_eager):
++        amount, term_months = Decimal("200000.00"), 12
++        _set_income_for_ratio(user, product, amount, term_months, ratio="0.6")  # -> REJECTED
++
++        created = _create_application(client_authed, product, amount, term_months)
++        application_id = created["id"]
++        _submit(client_authed, application_id)
++
++        app_obj = CreditApplication.objects.get(id=application_id)
++        assert app_obj.status == "REJECTED"
++        assert ScoringResult.objects.get(application=app_obj).decision == "REJECTED"
++        assert not Loan.objects.filter(application=app_obj).exists()
++
++    def test_underwriter_approval_of_manual_review_creates_loan(
++        self, client_authed, underwriter_client, user, product, celery_eager
++    ):
++        """MANUAL_REVIEW -> одобрение через admin API (approve_application) -> DISBURSED + Loan.
++
++        ASSUMPTION: путь /api/v1/admin/applications/{id}/approve — сверить с
++        apps/adminpanel/views.py::AdminApplicationViewSet, которого у меня пока нет.
++        """
++        amount, term_months = Decimal("200000.00"), 12
++        _set_income_for_ratio(user, product, amount, term_months, ratio="0.3")  # -> MANUAL_REVIEW
++
++        created = _create_application(client_authed, product, amount, term_months)
++        application_id = created["id"]
++        _submit(client_authed, application_id)
++
++        app_obj = CreditApplication.objects.get(id=application_id)
++        assert app_obj.status == "MANUAL_REVIEW"
++
++        resp = underwriter_client.post(f"/api/v1/admin/applications/{application_id}/approve", {"comment": "OK"})
++        assert resp.status_code == status.HTTP_200_OK, resp.content
++
++        app_obj.refresh_from_db()
++        assert app_obj.status == "DISBURSED"
++        loan = Loan.objects.get(application=app_obj)
++        assert PaymentScheduleItem.objects.filter(loan=loan).count() == term_months
+diff --git a/creditflow-backend/backend-middle/conftest.py b/creditflow-backend/backend-middle/conftest.py
+new file mode 100644
+index 0000000..2b6f1b1
+--- /dev/null
++++ b/creditflow-backend/backend-middle/conftest.py
+@@ -0,0 +1,131 @@
++"""
++Общие фикстуры для интеграционных/E2E тестов backend-middle.
++
++Построено на основе реальных apps/applications/models.py, apps/lending/models.py,
++apps/lending/services.py, config/settings.py, config/urls.py и стиля apps/lending/tests.py
++(которые прислал пользователь). Там, где нужного файла ещё не было
++(apps/applications/services.py, apps/applications/urls.py, apps/adminpanel/*,
++apps/rbac/services.py напрямую), помечено # ASSUMPTION — сверить перед использованием.
++"""
++from decimal import Decimal
++
++import pytest
++from django.core.cache import cache
++from django.core.management import call_command
++from rest_framework.test import APIClient
++from rest_framework_simplejwt.tokens import RefreshToken
++
++from apps.accounts.models import User
++from apps.products.models import CreditProduct
++from apps.rbac.services import assign_role  # подтверждено использованием в apps/lending/tests.py
++
++# Совпадает с TEST_CACHES / TEST_CHANNEL_LAYERS из apps/lending/tests.py —
++# чтобы тесты не требовали настоящего Redis.
++TEST_CACHES = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
++TEST_CHANNEL_LAYERS = {"default": {"BACKEND": "channels.layers.InMemoryChannelLayer"}}
++
++
++@pytest.fixture(autouse=True)
++def _test_infra(db, settings):
++    """Автоматически на каждый тест: локальный кэш вместо Redis (RBAC-кэш
++    в common/permissions.py), in-memory channel layer вместо Redis Channels,
++    и сид ролей/прав (без него assign_role/HasPermission не сработают)."""
++    settings.CACHES = TEST_CACHES
++    settings.CHANNEL_LAYERS = TEST_CHANNEL_LAYERS
++    cache.clear()
++    call_command("seed_rbac")
++
++
++@pytest.fixture
++def celery_eager(settings):
++    """Синхронное выполнение celery-задач (скоринг, email, cron) внутри теста."""
++    settings.CELERY_TASK_ALWAYS_EAGER = True
++    settings.CELERY_TASK_EAGER_PROPAGATES = True
++    return settings
++
++
++@pytest.fixture
++def product(db):
++    """Активный кредитный продукт. Поля 1:1 с make_product() из apps/lending/tests.py."""
++    return CreditProduct.objects.create(
++        name="Потребительский",
++        slug="consumer",
++        min_amount=Decimal("10000.00"),
++        max_amount=Decimal("500000.00"),
++        interest_rate=Decimal("18.50"),
++        min_term_months=3,
++        max_term_months=36,
++        is_active=True,
++    )
++
++
++def _make_user(email, role, monthly_income=None, birth_date=None):
++    """Аналог make_user_with_profile() из apps/lending/tests.py + назначение роли."""
++    user = User.objects.create_user(email=email, password="TestPass123!")
++    if hasattr(user, "profile"):
++        profile = user.profile
++        if monthly_income is not None:
++            profile.monthly_income = monthly_income
++        if birth_date is not None:
++            profile.birth_date = birth_date
++        profile.save()
++    assign_role(user, role)
++    return user
++
++
++@pytest.fixture
++def user(db):
++    """Обычный клиент (заявитель) с доходом/датой рождения, достаточными для скоринга."""
++    return _make_user(
++        "client@example.com",
++        role="CLIENT",
++        monthly_income=Decimal("100000.00"),
++        birth_date="1990-01-01",
++    )
++
++
++@pytest.fixture
++def underwriter_user(db):
++    return _make_user("underwriter@example.com", role="UNDERWRITER")
++
++
++@pytest.fixture
++def admin_user(db):
++    return _make_user("admin@example.com", role="ADMIN")
++
++
++@pytest.fixture
++def client_authed(user):
++    """DRF APIClient от лица обычного клиента. force_authenticate — как в
++    apps/lending/tests.py::LoanAPITests, а не реальный JWT-логин (эндпоинтов
++    /auth/register //auth/login сейчас нет в config/urls.py — см. auth_client_via_jwt
++    ниже, если тесту нужен настоящий токен, например для WebSocket)."""
++    client = APIClient()
++    client.force_authenticate(user=user)
++    return client
++
++
++@pytest.fixture
++def underwriter_client(underwriter_user):
++    client = APIClient()
++    client.force_authenticate(user=underwriter_user)
++    return client
++
++
++@pytest.fixture
++def admin_client(admin_user):
++    client = APIClient()
++    client.force_authenticate(user=admin_user)
++    return client
++
++
++@pytest.fixture
++def jwt_token_factory():
++    """Выдаёт настоящий access-токен (не force_authenticate) для сценариев,
++    которым нужен реальный JWT — в первую очередь apps.realtime.JWTAuthMiddleware
++    для WebSocket-подключений (токен передаётся в query ?token=)."""
++
++    def _make(user):
++        return str(RefreshToken.for_user(user).access_token)
++
++    return _make
+diff --git a/creditflow-backend/backend-middle/pytest.ini b/creditflow-backend/backend-middle/pytest.ini
+new file mode 100644
+index 0000000..ada68eb
+--- /dev/null
++++ b/creditflow-backend/backend-middle/pytest.ini
+@@ -0,0 +1,11 @@
++[pytest]
++DJANGO_SETTINGS_MODULE = config.settings
++python_files = tests.py test_*.py *_tests.py
++asyncio_mode = auto
++addopts =
++    --reuse-db
++    --cov=.
++    --cov-report=term-missing
++    --cov-report=html
++    --cov-fail-under=70
++    -v
+diff --git a/creditflow-backend/backend-middle/requirements-dev.txt b/creditflow-backend/backend-middle/requirements-dev.txt
+new file mode 100644
+index 0000000..209861f
+--- /dev/null
++++ b/creditflow-backend/backend-middle/requirements-dev.txt
+@@ -0,0 +1,11 @@
++-r requirements.txt
++
++pytest==8.2.2
++pytest-django==4.8.0
++pytest-cov==5.0.0
++pytest-asyncio==0.23.7   # для channels.testing.WebsocketCommunicator в асинхронных тестах
++pytest-env==1.1.3
++pytest-mock==3.14.0
++factory-boy==3.3.0       # ASSUMPTION: если фабрики уже используются в apps/*/tests.py, иначе можно убрать
++ruff==0.5.0
++black==24.4.2
