@@ -40,6 +40,12 @@ class CreditApplication(models.Model):
             models.CheckConstraint(condition=Q(amount__gt=0), name="application_amount_gt_0"),
             models.CheckConstraint(condition=Q(term_months__gte=1), name="application_term_gte_1"),
         ]
+        indexes = [
+            # Doc 3 §13.4: underwriter queue (status filter ordered by submission time).
+            models.Index(fields=["status", "submitted_at"]),
+            # Doc 3 §13.4: a client's applications filtered by status.
+            models.Index(fields=["user", "status"]),
+        ]
 
     def __str__(self):
         return f"Application<{self.id}> {self.status}"

@@ -5,11 +5,12 @@ from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
 from apps.accounts.models import User
+from apps.audit.models import AuditLog
 from apps.lending.models import Loan, PaymentScheduleItem
 from apps.products.models import CreditProduct
 
 from .models import CreditApplication, ScoringResult
-from .services import calc_annuity, compute_score, perform_scoring, submit_application
+from .services import calc_annuity, compute_score, perform_scoring, submit_application, underwriter_queue_queryset
 
 CELERY_EAGER = {"CELERY_TASK_ALWAYS_EAGER": True, "CELERY_TASK_EAGER_PROPAGATES": True}
 # perform_scoring now calls push_status (Doc 3 §7.3), which needs a channel layer;
@@ -246,3 +247,70 @@ class CreditApplicationAPITests(TestCase):
             {"amount": "250000.00", "term_months": 24},
         )
         self.assertEqual(r.status_code, 409)
+
+
+@override_settings(**CELERY_EAGER, CHANNEL_LAYERS=TEST_CHANNEL_LAYERS)
+class PerformScoringAuditLogTests(TestCase):
+    """Doc 3 §14: every status transition of perform_scoring is audited."""
+
+    def setUp(self):
+        self.product = make_product()
+
+    def test_status_change_is_logged_with_before_after(self):
+        user = make_user_with_profile(
+            "audited@example.com", monthly_income=Decimal("100000.00"), birth_date="1990-01-01"
+        )
+        application = CreditApplication.objects.create(
+            user=user, product=self.product, amount=Decimal("200000.00"), term_months=12,
+            monthly_payment=Decimal("18000.00"), status="SUBMITTED",
+        )
+
+        perform_scoring(application.id)
+
+        entries = AuditLog.objects.filter(
+            action="application.status_changed", object_type="CreditApplication", object_id=application.id
+        ).order_by("id")
+        self.assertEqual(entries.count(), 2)
+        self.assertEqual(entries[0].changes, {"before": "SUBMITTED", "after": "SCORING"})
+        self.assertEqual(entries[1].changes["before"], "SCORING")
+        self.assertIsNone(entries[0].actor)
+
+    def test_disbursement_writes_its_own_audit_entry(self):
+        user = make_user_with_profile(
+            "disbursed-audit@example.com", monthly_income=Decimal("100000.00"), birth_date="1990-01-01"
+        )
+        application = CreditApplication.objects.create(
+            user=user, product=self.product, amount=Decimal("200000.00"), term_months=12,
+            monthly_payment=Decimal("18000.00"), status="SUBMITTED",
+        )
+
+        perform_scoring(application.id)
+
+        self.assertTrue(AuditLog.objects.filter(action="loan.disbursed").exists())
+
+
+class UnderwriterQueueNPlusOneTests(TestCase):
+    """Doc 3 §13.1/§13.2: N+1 regression guard for the future underwriter dashboard queryset."""
+
+    def setUp(self):
+        self.product = make_product()
+        for i in range(5):
+            user = make_user_with_profile(
+                f"queue{i}@example.com", monthly_income=Decimal("50000.00"), birth_date="1990-01-01"
+            )
+            CreditApplication.objects.create(
+                user=user, product=self.product, amount=Decimal("100000.00"), term_months=12,
+                monthly_payment=Decimal("9000.00"), status="MANUAL_REVIEW",
+            )
+
+    def test_iterating_queue_does_not_trigger_per_row_queries(self):
+        qs = underwriter_queue_queryset()
+        # 1 query for the annotated queryset itself; accessing select_related
+        # fields (user, user.profile, product) must not add more.
+        with self.assertNumQueries(1):
+            rows = list(qs)
+            for row in rows:
+                _ = row.user.email
+                _ = row.user.profile.monthly_income
+                _ = row.product.name
+                _ = row.waiting_hours

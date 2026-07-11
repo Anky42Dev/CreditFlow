@@ -1,8 +1,11 @@
 from decimal import Decimal
 
+from django.db.models import F
+from django.db.models.functions import ExtractHour, Now
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
+from common.audit import audit_log
 from common.exceptions import ConflictError
 
 from .models import CreditApplication, ScoringResult
@@ -72,13 +75,24 @@ def compute_score(application: CreditApplication) -> int:
 def perform_scoring(application_id) -> CreditApplication:
     """Doc 3 §6.3. Этап 4 wires disburse_loan on APPROVED; push_status (Этап 5)
     notifies the applicant's WS group after each status change. notify_user
-    (email + in-app Notification) is wired here from Этап 6."""
+    (email + in-app Notification) is wired here from Этап 6.
+
+    Doc 3 §14: each status change is written to the AuditLog. These are
+    system-initiated (actor=None) since they come from the async scoring task,
+    not from a specific user's action."""
     from apps.realtime.push import push_status
     from apps.notifications.services import notify_user
 
     application = CreditApplication.objects.select_related("user__profile").get(id=application_id)
+    previous_status = application.status
     application.status = "SCORING"
     application.save(update_fields=["status"])
+    audit_log(
+        None,
+        "application.status_changed",
+        application,
+        changes={"before": previous_status, "after": "SCORING"},
+    )
     push_status(application)
 
     score = compute_score(application)
@@ -95,6 +109,12 @@ def perform_scoring(application_id) -> CreditApplication:
     ScoringResult.objects.create(application=application, score=score, decision=decision, reason=reason)
     application.status = decision
     application.save(update_fields=["status"])
+    audit_log(
+        None,
+        "application.status_changed",
+        application,
+        changes={"before": "SCORING", "after": decision},
+    )
     push_status(application)
     notify_user(application.user, f"application.{decision.lower()}", application)
 
@@ -106,12 +126,16 @@ def perform_scoring(application_id) -> CreditApplication:
     return application
 
 
-def approve_application(application: CreditApplication, comment: str = "") -> CreditApplication:
+def approve_application(application: CreditApplication, comment: str = "", actor=None, request=None) -> CreditApplication:
     """Doc 3 §10: admin/underwriter approval — only a MANUAL_REVIEW application can
     be approved this way. Mirrors perform_scoring's APPROVED branch: flips the
     application to APPROVED, then disburse_loan (already idempotent) takes it to
     DISBURSED and builds the payment schedule.
-    TODO(Этап 8): record actor + comment in AuditLog once that model exists.
+
+    `actor`/`request` are optional (default None) so existing callers/tests keep
+    working; the admin API view passes request.user and request so the
+    resulting AuditLog entry records who approved it, from where, and any
+    review comment.
     """
     from apps.lending.services import disburse_loan
     from apps.notifications.services import notify_user
@@ -122,6 +146,13 @@ def approve_application(application: CreditApplication, comment: str = "") -> Cr
 
     application.status = "APPROVED"
     application.save(update_fields=["status"])
+    audit_log(
+        actor,
+        "application.approved",
+        application,
+        changes={"comment": comment},
+        request=request,
+    )
     push_status(application)
     notify_user(application.user, "application.approved", application)
 
@@ -129,9 +160,11 @@ def approve_application(application: CreditApplication, comment: str = "") -> Cr
     return application
 
 
-def reject_application(application: CreditApplication, reason: str = "") -> CreditApplication:
+def reject_application(application: CreditApplication, reason: str = "", actor=None, request=None) -> CreditApplication:
     """Doc 3 §10: admin/underwriter rejection of a MANUAL_REVIEW application.
-    TODO(Этап 8): record actor + reason in AuditLog once that model exists.
+
+    `actor`/`request` are optional (default None) for the same reason as in
+    approve_application above.
     """
     from apps.notifications.services import notify_user
     from apps.realtime.push import push_status
@@ -141,6 +174,13 @@ def reject_application(application: CreditApplication, reason: str = "") -> Cred
 
     application.status = "REJECTED"
     application.save(update_fields=["status"])
+    audit_log(
+        actor,
+        "application.rejected",
+        application,
+        changes={"reason": reason},
+        request=request,
+    )
     push_status(application)
     notify_user(application.user, "application.rejected", application)
     return application
@@ -154,3 +194,17 @@ def request_documents(application: CreditApplication) -> CreditApplication:
 
     notify_user(application.user, "application.documents_requested", application)
     return application
+
+
+def underwriter_queue_queryset():
+    """Doc 3 §13.1/§13.2: the MANUAL_REVIEW queue an underwriter dashboard would
+    sort by staleness. select_related avoids per-row queries for user/profile/
+    product, and waiting_hours is annotated in the DB (ExtractHour(Now() -
+    submitted_at)) instead of computed per-row in Python, so iterating the
+    queryset and reading these fields costs exactly one query."""
+    return (
+        CreditApplication.objects.filter(status="MANUAL_REVIEW")
+        .select_related("user", "user__profile", "product")
+        .annotate(waiting_hours=ExtractHour(Now() - F("submitted_at")))
+        .order_by("submitted_at")
+    )

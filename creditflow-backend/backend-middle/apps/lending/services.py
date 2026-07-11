@@ -4,6 +4,7 @@ from dateutil.relativedelta import relativedelta
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
+from common.audit import audit_log
 from common.exceptions import ConflictError
 
 from .models import Loan, PaymentScheduleItem, Transaction
@@ -41,6 +42,12 @@ def disburse_loan(application) -> Loan:
     from apps.notifications.services import notify_user
 
     notify_user(loan.user, "loan.disbursed", loan)
+    audit_log(
+        application.user,
+        "loan.disbursed",
+        loan,
+        changes={"principal": str(loan.principal), "term_months": loan.term_months},
+    )
 
     return loan
 
@@ -73,12 +80,16 @@ def build_payment_schedule(loan: Loan) -> None:
 
 
 @transaction.atomic
-def repay(loan: Loan, amount: Decimal, idempotency_key: str) -> Loan:
+def repay(loan: Loan, amount: Decimal, idempotency_key: str, actor=None, request=None) -> Loan:
     """Doc 3 §9.2. select_for_update serializes concurrent repayments on the
     same loan, so a retried request with the same idempotency_key blocks
     until the first attempt commits, then observes it and raises ConflictError
     instead of double-crediting. The IntegrityError catch is defense-in-depth
-    against a duplicate key racing in from a different loan."""
+    against a duplicate key racing in from a different loan.
+
+    `actor`/`request` are optional (default None) so existing callers/tests
+    that don't pass them keep working; the API view passes request.user and
+    request so the resulting AuditLog entry records who repaid and from where."""
     loan = Loan.objects.select_for_update().get(id=loan.id)
 
     if Transaction.objects.filter(idempotency_key=idempotency_key).exists():
@@ -110,5 +121,13 @@ def repay(loan: Loan, amount: Decimal, idempotency_key: str) -> Loan:
         )
     except IntegrityError:
         raise ConflictError(code="DUPLICATE", message="Repayment already processed")
+
+    audit_log(
+        actor,
+        "loan.repaid",
+        loan,
+        changes={"amount": str(amount), "outstanding_balance": str(loan.outstanding_balance)},
+        request=request,
+    )
 
     return loan

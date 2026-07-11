@@ -24,4 +24,5 @@ urlpatterns = [
     path('api/v1/', include('apps.lending.urls')),
     path('api/v1/', include('apps.notifications.urls')),
     path('api/v1/', include('apps.adminpanel.urls')),
+    path('api/v1/', include('apps.audit.urls')),
 ]

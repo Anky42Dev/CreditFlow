@@ -1,4 +1,3 @@
-from django.core.cache import cache
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
@@ -11,8 +10,10 @@ from apps.accounts.models import User
 from apps.applications.models import CreditApplication
 from apps.applications.services import approve_application, reject_application, request_documents
 from apps.products.models import CreditProduct
+from apps.products.services import invalidate_product_cache
 from apps.rbac.models import Role
 from apps.rbac.services import assign_role
+from common.audit import audit_log
 from common.permissions import HasPermission
 
 from .filters import AdminApplicationFilter, AdminUserFilter
@@ -36,27 +37,29 @@ class AdminCreditProductViewSet(viewsets.ModelViewSet):
     queryset = CreditProduct.objects.all().order_by("-created_at")
     http_method_names = ["get", "post", "put", "delete", "head", "options"]
 
-    def _invalidate_cache(self, product_id):
-        # Doc 3 §8: get_active_products/get_product (Этап 8) read through these
-        # keys — invalidating them now is a no-op until that caching lands, but
-        # costs nothing and keeps this endpoint correct once it does.
-        cache.delete("products:active")
-        cache.delete(f"product:{product_id}")
-
     def perform_create(self, serializer):
         instance = serializer.save()
-        self._invalidate_cache(instance.id)
+        invalidate_product_cache(instance.id)
+        audit_log(self.request.user, "product.created", instance, request=self.request)
 
     def perform_update(self, serializer):
         instance = serializer.save()
-        self._invalidate_cache(instance.id)
+        invalidate_product_cache(instance.id)
+        audit_log(
+            self.request.user,
+            "product.updated",
+            instance,
+            changes=serializer.validated_data,
+            request=self.request,
+        )
 
     def destroy(self, request, *args, **kwargs):
         """Doc 3 §10: soft delete — deactivates instead of removing the row."""
         instance = self.get_object()
         instance.is_active = False
         instance.save(update_fields=["is_active"])
-        self._invalidate_cache(instance.id)
+        invalidate_product_cache(instance.id)
+        audit_log(request.user, "product.deleted", instance, request=request)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -104,7 +107,12 @@ class AdminApplicationViewSet(viewsets.ReadOnlyModelViewSet):
         application = self.get_object()
         serializer = ApproveApplicationSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        approve_application(application, comment=serializer.validated_data["comment"])
+        approve_application(
+            application,
+            comment=serializer.validated_data["comment"],
+            actor=request.user,
+            request=request,
+        )
         application.refresh_from_db()
         return Response(AdminApplicationDetailSerializer(application).data)
 
@@ -113,7 +121,12 @@ class AdminApplicationViewSet(viewsets.ReadOnlyModelViewSet):
         application = self.get_object()
         serializer = RejectApplicationSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        reject_application(application, reason=serializer.validated_data["reason"])
+        reject_application(
+            application,
+            reason=serializer.validated_data["reason"],
+            actor=request.user,
+            request=request,
+        )
         application.refresh_from_db()
         return Response(AdminApplicationDetailSerializer(application).data)
 
@@ -144,7 +157,7 @@ class AdminUserViewSet(viewsets.ReadOnlyModelViewSet):
         role_code = serializer.validated_data["role"]
 
         try:
-            assign_role(user, role_code)
+            assign_role(user, role_code, actor=request.user, request=request)
         except Role.DoesNotExist:
             raise ValidationError({"role": [f"Unknown role code: {role_code}"]})
 

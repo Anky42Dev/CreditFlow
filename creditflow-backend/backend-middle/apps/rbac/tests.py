@@ -4,6 +4,7 @@ from django.db import IntegrityError
 from django.test import TestCase, override_settings
 
 from apps.accounts.models import User
+from apps.audit.models import AuditLog
 from common.permissions import user_has_permission
 from .models import Permission, Role, RolePermission, UserRole
 from .services import assign_role, revoke_role
@@ -92,6 +93,22 @@ class AssignRevokeRoleServiceTests(TestCase):
 
         self.assertFalse(UserRole.objects.filter(user=self.user, role__code="ADMIN").exists())
         self.assertIsNone(cache.get(f"user_perms:{self.user.id}"))
+
+    def test_assign_role_writes_audit_entry(self):
+        admin = User.objects.create_user(email="rbac-admin@example.com", password="pw12345")
+        assign_role(self.user, "UNDERWRITER", actor=admin)
+
+        entry = AuditLog.objects.get(action="user.role_assigned", object_id=self.user.id)
+        self.assertEqual(entry.actor, admin)
+        self.assertEqual(entry.changes, {"role": "UNDERWRITER"})
+
+    def test_revoke_role_writes_audit_entry(self):
+        assign_role(self.user, "ADMIN")
+        revoke_role(self.user, "ADMIN")
+
+        entry = AuditLog.objects.get(action="user.role_revoked", object_id=self.user.id)
+        self.assertEqual(entry.changes, {"role": "ADMIN"})
+        self.assertIsNone(entry.actor)
 
 
 @override_settings(CACHES=TEST_CACHES)

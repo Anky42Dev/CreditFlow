@@ -9,6 +9,7 @@ from rest_framework.test import APIClient
 from apps.accounts.models import User
 from apps.applications.models import CreditApplication
 from apps.applications.services import calc_annuity, perform_scoring
+from apps.audit.models import AuditLog
 from apps.products.models import CreditProduct
 from apps.rbac.services import assign_role
 from common.exceptions import ConflictError
@@ -77,6 +78,15 @@ class DisburseLoanTests(TestCase):
 
         self.application.refresh_from_db()
         self.assertEqual(self.application.status, "DISBURSED")
+
+    def test_writes_loan_disbursed_audit_entry(self):
+        loan = disburse_loan(self.application)
+
+        entry = AuditLog.objects.get(action="loan.disbursed")
+        self.assertEqual(entry.object_type, "Loan")
+        self.assertEqual(entry.object_id, loan.id)
+        self.assertEqual(entry.actor, self.application.user)
+        self.assertEqual(entry.changes["principal"], str(loan.principal))
 
     def test_schedule_fully_amortizes_principal(self):
         loan = disburse_loan(self.application)
@@ -162,6 +172,20 @@ class RepayServiceTests(TestCase):
         with self.assertRaises(ConflictError):
             repay(self.loan, Decimal("100.00"), "key-after-close")
 
+    def test_writes_loan_repaid_audit_entry_with_actor(self):
+        repay(self.loan, self.loan.monthly_payment, "key-audit", actor=self.application.user)
+
+        entry = AuditLog.objects.get(action="loan.repaid")
+        self.assertEqual(entry.object_id, self.loan.id)
+        self.assertEqual(entry.actor, self.application.user)
+        self.assertEqual(entry.changes["amount"], str(self.loan.monthly_payment))
+
+    def test_repay_without_actor_logs_system_entry(self):
+        repay(self.loan, self.loan.monthly_payment, "key-no-actor")
+
+        entry = AuditLog.objects.get(action="loan.repaid")
+        self.assertIsNone(entry.actor)
+
 
 @override_settings(**CELERY_EAGER, CACHES=TEST_CACHES, CHANNEL_LAYERS=TEST_CHANNEL_LAYERS)
 class LoanAPITests(TestCase):
@@ -235,3 +259,11 @@ class LoanAPITests(TestCase):
             {"amount": "0.00", "idempotency_key": "api-key-invalid"},
         )
         self.assertEqual(r.status_code, 400)
+
+    def test_repay_endpoint_logs_authenticated_user_as_actor(self):
+        self.client.post(
+            f"/api/v1/loans/{self.loan.id}/repay",
+            {"amount": str(self.loan.monthly_payment), "idempotency_key": "api-key-audit"},
+        )
+        entry = AuditLog.objects.get(action="loan.repaid")
+        self.assertEqual(entry.actor, self.user)

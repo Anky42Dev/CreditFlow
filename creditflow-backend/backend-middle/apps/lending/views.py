@@ -31,7 +31,13 @@ class LoanViewSet(viewsets.ReadOnlyModelViewSet):
         loan = self.get_object()
         serializer = RepaySerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        loan = repay(loan, serializer.validated_data["amount"], serializer.validated_data["idempotency_key"])
+        loan = repay(
+            loan,
+            serializer.validated_data["amount"],
+            serializer.validated_data["idempotency_key"],
+            actor=request.user,
+            request=request,
+        )
         # repay() re-fetches the loan without the list/detail prefetches; reload
         # here so the response doesn't trigger extra per-relation queries.
         loan = self.get_queryset().get(id=loan.id)

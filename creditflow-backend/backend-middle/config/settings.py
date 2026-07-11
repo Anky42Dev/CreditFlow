@@ -42,6 +42,7 @@ INSTALLED_APPS = [
     "apps.realtime",
     "apps.notifications",
     "apps.adminpanel",
+    "apps.audit",
 ]
 
 MIDDLEWARE = [
