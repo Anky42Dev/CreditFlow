@@ -105,6 +105,29 @@ class AdminCreditProductAPITests(SetupSeedMixin, TestCase):
         self.assertIsNone(cache.get("products:active"))
         self.assertIsNone(cache.get(f"product:{self.product.id}"))
 
+    def test_AC6_public_list_reflects_new_data_after_admin_update_invalidates_cache(self):
+        """DOC 3 §18 AC-6: product updated -> GET /credit-products serves fresh data,
+        not the stale cached copy (extends test_admin_update_invalidates_cache, which only
+        checks the cache keys directly, with the public-facing read path)."""
+        anon = APIClient()
+        stale = anon.get("/api/v1/credit-products")
+        stale_item = next(item for item in stale.data["results"] if item["id"] == self.product.id)
+        self.assertEqual(stale_item["interest_rate"], "18.50")
+
+        admin_client = APIClient()
+        admin_client.force_authenticate(user=self.admin)
+        r = admin_client.put(f"/api/v1/admin/credit-products/{self.product.id}", {
+            "name": self.product.name, "slug": self.product.slug,
+            "min_amount": "10000.00", "max_amount": "500000.00",
+            "interest_rate": "20.00", "min_term_months": 3, "max_term_months": 36,
+            "is_active": True,
+        })
+        self.assertEqual(r.status_code, 200)
+
+        fresh = anon.get("/api/v1/credit-products")
+        fresh_item = next(item for item in fresh.data["results"] if item["id"] == self.product.id)
+        self.assertEqual(fresh_item["interest_rate"], "20.00")
+
     def test_delete_soft_deactivates_instead_of_removing_row(self):
         client = APIClient()
         client.force_authenticate(user=self.admin)

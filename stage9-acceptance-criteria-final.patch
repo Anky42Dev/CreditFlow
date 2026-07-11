@@ -1,0 +1,113 @@
+diff --git a/creditflow-backend/backend-middle/apps/adminpanel/tests.py b/creditflow-backend/backend-middle/apps/adminpanel/tests.py
+index 36671e5..efd8449 100644
+--- a/creditflow-backend/backend-middle/apps/adminpanel/tests.py
++++ b/creditflow-backend/backend-middle/apps/adminpanel/tests.py
+@@ -105,6 +105,29 @@ class AdminCreditProductAPITests(SetupSeedMixin, TestCase):
+         self.assertIsNone(cache.get("products:active"))
+         self.assertIsNone(cache.get(f"product:{self.product.id}"))
+ 
++    def test_AC6_public_list_reflects_new_data_after_admin_update_invalidates_cache(self):
++        """DOC 3 §18 AC-6: product updated -> GET /credit-products serves fresh data,
++        not the stale cached copy (extends test_admin_update_invalidates_cache, which only
++        checks the cache keys directly, with the public-facing read path)."""
++        anon = APIClient()
++        stale = anon.get("/api/v1/credit-products")
++        stale_item = next(item for item in stale.data["results"] if item["id"] == self.product.id)
++        self.assertEqual(stale_item["interest_rate"], "18.50")
++
++        admin_client = APIClient()
++        admin_client.force_authenticate(user=self.admin)
++        r = admin_client.put(f"/api/v1/admin/credit-products/{self.product.id}", {
++            "name": self.product.name, "slug": self.product.slug,
++            "min_amount": "10000.00", "max_amount": "500000.00",
++            "interest_rate": "20.00", "min_term_months": 3, "max_term_months": 36,
++            "is_active": True,
++        })
++        self.assertEqual(r.status_code, 200)
++
++        fresh = anon.get("/api/v1/credit-products")
++        fresh_item = next(item for item in fresh.data["results"] if item["id"] == self.product.id)
++        self.assertEqual(fresh_item["interest_rate"], "20.00")
++
+     def test_delete_soft_deactivates_instead_of_removing_row(self):
+         client = APIClient()
+         client.force_authenticate(user=self.admin)
+diff --git a/creditflow-backend/backend-middle/apps/rbac/tests.py b/creditflow-backend/backend-middle/apps/rbac/tests.py
+index b4afa7b..4a39700 100644
+--- a/creditflow-backend/backend-middle/apps/rbac/tests.py
++++ b/creditflow-backend/backend-middle/apps/rbac/tests.py
+@@ -16,15 +16,18 @@ TEST_CACHES = {
+ 
+ class RoleModelTests(TestCase):
+     def test_role_code_is_unique(self):
+-        Role.objects.create(code="CLIENT", name="Client")
++        # NOTE: the autouse `_test_infra` fixture (conftest.py) runs seed_rbac
++        # before every test, so CLIENT/ADMIN/SUPPORT/UNDERWRITER already exist.
++        # Use a code outside the seeded matrix to isolate this test from that seed data.
++        Role.objects.create(code="TEST_ROLE_UNIQUE", name="Test role")
+         with self.assertRaises(IntegrityError):
+-            Role.objects.create(code="CLIENT", name="Client duplicate")
++            Role.objects.create(code="TEST_ROLE_UNIQUE", name="Test role duplicate")
+ 
+ 
+ class RolePermissionModelTests(TestCase):
+     def test_role_permission_pair_is_unique(self):
+-        role = Role.objects.create(code="ADMIN", name="Admin")
+-        perm = Permission.objects.create(code="user.manage")
++        role = Role.objects.create(code="TEST_ROLE_PERM", name="Test role")
++        perm = Permission.objects.create(code="test.permission.unique")
+         RolePermission.objects.create(role=role, permission=perm)
+         with self.assertRaises(IntegrityError):
+             RolePermission.objects.create(role=role, permission=perm)
+@@ -33,7 +36,7 @@ class RolePermissionModelTests(TestCase):
+ class UserRoleModelTests(TestCase):
+     def test_user_role_pair_is_unique(self):
+         user = User.objects.create_user(email="a@example.com", password="pw12345")
+-        role = Role.objects.create(code="SUPPORT", name="Support")
++        role = Role.objects.create(code="TEST_ROLE_USER", name="Test role")
+         UserRole.objects.create(user=user, role=role)
+         with self.assertRaises(IntegrityError):
+             UserRole.objects.create(user=user, role=role)
+diff --git a/creditflow-backend/backend-middle/apps/realtime/tests.py b/creditflow-backend/backend-middle/apps/realtime/tests.py
+index 753cb44..73c86f0 100644
+--- a/creditflow-backend/backend-middle/apps/realtime/tests.py
++++ b/creditflow-backend/backend-middle/apps/realtime/tests.py
+@@ -2,7 +2,7 @@ from decimal import Decimal
+ 
+ from asgiref.sync import sync_to_async
+ from channels.testing import WebsocketCommunicator
+-from django.test import TestCase, override_settings
++from django.test import TransactionTestCase, override_settings
+ from rest_framework_simplejwt.tokens import AccessToken
+ 
+ from apps.accounts.models import User
+@@ -31,7 +31,7 @@ def make_product(**overrides):
+ 
+ 
+ @override_settings(CHANNEL_LAYERS=TEST_CHANNEL_LAYERS)
+-class NotificationConsumerConnectTests(TestCase):
++class NotificationConsumerConnectTests(TransactionTestCase):
+     def setUp(self):
+         self.user = User.objects.create_user(email="ws@example.com", password="pw12345")
+ 
+@@ -65,7 +65,7 @@ class NotificationConsumerConnectTests(TestCase):
+ 
+ 
+ @override_settings(CHANNEL_LAYERS=TEST_CHANNEL_LAYERS)
+-class PushStatusDeliveryTests(TestCase):
++class PushStatusDeliveryTests(TransactionTestCase):
+     """Doc 3 §17/AC-4: a connected client receives application_status pushes."""
+ 
+     def setUp(self):
+diff --git a/creditflow-backend/backend-middle/config/urls.py b/creditflow-backend/backend-middle/config/urls.py
+index aeab495..f4aa31e 100644
+--- a/creditflow-backend/backend-middle/config/urls.py
++++ b/creditflow-backend/backend-middle/config/urls.py
+@@ -19,6 +19,7 @@ from django.urls import include, path
+ 
+ urlpatterns = [
+     path('admin/', admin.site.urls),
++    path('api/v1/', include('apps.accounts.urls')),
+     path('api/v1/', include('apps.products.urls')),
+     path('api/v1/', include('apps.applications.urls')),
+     path('api/v1/', include('apps.lending.urls')),

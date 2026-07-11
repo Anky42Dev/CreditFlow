@@ -2,7 +2,7 @@ from decimal import Decimal
 
 from asgiref.sync import sync_to_async
 from channels.testing import WebsocketCommunicator
-from django.test import TestCase, override_settings
+from django.test import TransactionTestCase, override_settings
 from rest_framework_simplejwt.tokens import AccessToken
 
 from apps.accounts.models import User
@@ -31,7 +31,7 @@ def make_product(**overrides):
 
 
 @override_settings(CHANNEL_LAYERS=TEST_CHANNEL_LAYERS)
-class NotificationConsumerConnectTests(TestCase):
+class NotificationConsumerConnectTests(TransactionTestCase):
     def setUp(self):
         self.user = User.objects.create_user(email="ws@example.com", password="pw12345")
 
@@ -65,7 +65,7 @@ class NotificationConsumerConnectTests(TestCase):
 
 
 @override_settings(CHANNEL_LAYERS=TEST_CHANNEL_LAYERS)
-class PushStatusDeliveryTests(TestCase):
+class PushStatusDeliveryTests(TransactionTestCase):
     """Doc 3 §17/AC-4: a connected client receives application_status pushes."""
 
     def setUp(self):

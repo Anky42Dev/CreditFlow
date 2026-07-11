@@ -16,15 +16,18 @@ TEST_CACHES = {
 
 class RoleModelTests(TestCase):
     def test_role_code_is_unique(self):
-        Role.objects.create(code="CLIENT", name="Client")
+        # NOTE: the autouse `_test_infra` fixture (conftest.py) runs seed_rbac
+        # before every test, so CLIENT/ADMIN/SUPPORT/UNDERWRITER already exist.
+        # Use a code outside the seeded matrix to isolate this test from that seed data.
+        Role.objects.create(code="TEST_ROLE_UNIQUE", name="Test role")
         with self.assertRaises(IntegrityError):
-            Role.objects.create(code="CLIENT", name="Client duplicate")
+            Role.objects.create(code="TEST_ROLE_UNIQUE", name="Test role duplicate")
 
 
 class RolePermissionModelTests(TestCase):
     def test_role_permission_pair_is_unique(self):
-        role = Role.objects.create(code="ADMIN", name="Admin")
-        perm = Permission.objects.create(code="user.manage")
+        role = Role.objects.create(code="TEST_ROLE_PERM", name="Test role")
+        perm = Permission.objects.create(code="test.permission.unique")
         RolePermission.objects.create(role=role, permission=perm)
         with self.assertRaises(IntegrityError):
             RolePermission.objects.create(role=role, permission=perm)
@@ -33,7 +36,7 @@ class RolePermissionModelTests(TestCase):
 class UserRoleModelTests(TestCase):
     def test_user_role_pair_is_unique(self):
         user = User.objects.create_user(email="a@example.com", password="pw12345")
-        role = Role.objects.create(code="SUPPORT", name="Support")
+        role = Role.objects.create(code="TEST_ROLE_USER", name="Test role")
         UserRole.objects.create(user=user, role=role)
         with self.assertRaises(IntegrityError):
             UserRole.objects.create(user=user, role=role)
