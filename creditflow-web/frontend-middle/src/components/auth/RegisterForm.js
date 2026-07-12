@@ -1,0 +1,64 @@
+"use client";
+
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import toast from "react-hot-toast";
+import { registerSchema } from "@/lib/validation/schemas";
+import { authApi } from "@/lib/api/auth";
+import { Input } from "@/components/ui/Input";
+import { Button } from "@/components/ui/Button";
+
+export default function RegisterForm() {
+  const router = useRouter();
+  const {
+    register,
+    handleSubmit,
+    setError,
+    formState: { errors, isSubmitting },
+  } = useForm({ resolver: zodResolver(registerSchema) });
+
+  const onSubmit = async (values) => {
+    try {
+      await authApi.register(values);
+      toast.success("Регистрация успешна! Войдите.");
+      router.push("/login");
+    } catch (e) {
+      const code = e.response?.data?.error?.code;
+      if (code === "EMAIL_TAKEN") {
+        setError("email", { message: "Email уже занят" });
+      } else {
+        toast.error("Ошибка регистрации");
+      }
+    }
+  };
+
+  return (
+    <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
+      <Input
+        label="Email"
+        type="email"
+        placeholder="you@example.com"
+        error={errors.email?.message}
+        {...register("email")}
+      />
+      <Input
+        label="Пароль"
+        type="password"
+        placeholder="••••••••"
+        error={errors.password?.message}
+        {...register("password")}
+      />
+      <Button type="submit" disabled={isSubmitting} className="w-full">
+        Зарегистрироваться
+      </Button>
+      <p className="text-center text-sm text-gray-600 dark:text-gray-400">
+        Уже есть аккаунт?{" "}
+        <Link href="/login" className="text-blue-600 hover:underline">
+          Войти
+        </Link>
+      </p>
+    </form>
+  );
+}
