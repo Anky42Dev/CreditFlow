@@ -30,6 +30,14 @@ class RegisterView(APIView):
         return Response(UserSerializer(user).data, status=status.HTTP_201_CREATED)
 
 
+class MeView(APIView):
+    """DOC 1 §auth: GET /auth/me -> 200 {id, email, role} for the authenticated user."""
+
+    @extend_schema(responses={200: UserSerializer})
+    def get(self, request):
+        return Response(UserSerializer(request.user).data)
+
+
 class ProfileView(RetrieveUpdateAPIView):
     """DOC 0 §6.2, task step 0: GET returns current user + profile data;
     PUT updates profile fields only (ФИО, дата рождения, доход, телефон).
