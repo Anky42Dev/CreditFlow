@@ -25,11 +25,18 @@ export default function RegisterForm() {
       toast.success("Регистрация успешна! Войдите.");
       router.push("/login");
     } catch (e) {
-      const code = e.response?.data?.error?.code;
-      if (code === "EMAIL_TAKEN") {
+      const error = e.response?.data?.error;
+      if (error?.code === "EMAIL_TAKEN") {
         setError("email", { message: "Email уже занят" });
+        return;
+      }
+      const details = error?.details;
+      if (details && typeof details === "object") {
+        Object.entries(details).forEach(([field, messages]) => {
+          setError(field, { message: [].concat(messages).join(" ") });
+        });
       } else {
-        toast.error("Ошибка регистрации");
+        toast.error(error?.message || "Ошибка регистрации");
       }
     }
   };

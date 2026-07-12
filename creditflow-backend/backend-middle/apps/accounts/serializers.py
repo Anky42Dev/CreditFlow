@@ -5,6 +5,8 @@ from django.contrib.auth.password_validation import validate_password as django_
 from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import serializers
 
+from common.permissions import get_user_permissions
+
 from .models import Profile, User
 
 PHONE_REGEX = re.compile(r"^\+?\d{7,15}$")
@@ -28,10 +30,19 @@ class RegisterSerializer(serializers.Serializer):
 
 
 class UserSerializer(serializers.ModelSerializer):
+    """Doc 4 §3: GET /auth/me includes the resolved RBAC permission codes so
+    the frontend can gate UI without re-deriving role -> permission mapping.
+    """
+
+    permissions = serializers.SerializerMethodField()
+
     class Meta:
         model = User
-        fields = ["id", "email", "role"]
+        fields = ["id", "email", "role", "permissions"]
         read_only_fields = fields
+
+    def get_permissions(self, obj):
+        return sorted(get_user_permissions(obj))
 
 
 class ProfileSerializer(serializers.ModelSerializer):

@@ -3,7 +3,7 @@
 
 **Версия:** 1.0
 **Уровень:** Middle
-**Стек (добавлено):** native WebSocket, react-window (виртуализация), dynamic import (code splitting)
+**Стек (добавлено):** native WebSocket, @tanstack/react-virtual (виртуализация), dynamic import (code splitting)
 **Зависит от:** DOC 0, DOC 2 (Frontend Junior), DOC 3 (Backend Middle API)
 
 ---
@@ -347,7 +347,7 @@ const AuditTable = dynamic(() => import("@/components/admin/AuditTable"), {
 
 ### 9.3 Виртуализация длинных списков
 
-Для графика платежей на 60 месяцев и больших админ-таблиц — `react-window` (рендер только видимых строк).
+Для графика платежей на 60 месяцев и больших админ-таблиц — `@tanstack/react-virtual` (рендер только видимых строк).
 
 ---
 

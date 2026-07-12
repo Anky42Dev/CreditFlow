@@ -6,8 +6,8 @@ from apps.rbac.models import Permission
 USER_PERMS_CACHE_TTL = 300  # seconds, Doc 3 §5.1
 
 
-def user_has_permission(user, perm_code: str) -> bool:
-    """Checks whether `user` holds `perm_code`, caching the resolved set in Redis.
+def get_user_permissions(user) -> set:
+    """Resolves the full permission-code set held by `user`, caching in Redis.
 
     Cache invalidated by apps.rbac.services.assign_role/revoke_role.
     """
@@ -20,7 +20,12 @@ def user_has_permission(user, perm_code: str) -> bool:
             ).values_list("code", flat=True)
         )
         cache.set(cache_key, perms, USER_PERMS_CACHE_TTL)
-    return perm_code in perms
+    return perms
+
+
+def user_has_permission(user, perm_code: str) -> bool:
+    """Checks whether `user` holds `perm_code` (see get_user_permissions)."""
+    return perm_code in get_user_permissions(user)
 
 
 class HasPermission(BasePermission):
