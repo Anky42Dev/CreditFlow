@@ -1,3 +1,9 @@
+// NOTE (Stage 6 — Тестирование и CI): kept as-is, unmodified, as a manual
+// smoke/verification script. Its scenarios (AC-1, AC-2, AC-7, AC-8, AC-5)
+// have been ported into proper Playwright test files with `expect` under
+// e2e/*.spec.js (see e2e/rbac.spec.js, e2e/admin-applications.spec.js,
+// e2e/repay-idempotency.spec.js) for CI. Run this file directly with
+// `node verify_stage6.mjs` against a running app for a quick manual check.
 import { chromium } from "playwright";
 
 const BASE = "http://localhost:3000";
