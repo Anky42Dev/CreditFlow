@@ -1,0 +1,1078 @@
+diff --git a/next.config.mjs b/next.config.mjs
+index 168e8ce..41259b3 100644
+--- a/next.config.mjs
++++ b/next.config.mjs
+@@ -8,6 +8,10 @@ const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+ const wsUrl = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000";
+ const isDev = process.env.NODE_ENV === "development";
+ 
++// DOC 6 §4: user-uploaded avatars are served by the Django backend (MEDIA_URL),
++// so next/image needs that host explicitly allow-listed to optimize them.
++const apiUrlObj = new URL(apiUrl);
++
+ // DOC 6 §3.4: CSP + baseline security headers. Nonce-based script-src would
+ // force every page into dynamic rendering app-wide (see Next.js CSP guide),
+ // which conflicts with the static/ISR optimization this same roadmap plans
+@@ -32,6 +36,16 @@ const nextConfig = {
+   },
+   // DOC 6 §7.2: readable stack traces for the monitoring integration.
+   productionBrowserSourceMaps: true,
++  images: {
++    remotePatterns: [
++      {
++        protocol: apiUrlObj.protocol.replace(":", ""),
++        hostname: apiUrlObj.hostname,
++        port: apiUrlObj.port || "",
++        pathname: "/media/**",
++      },
++    ],
++  },
+   async headers() {
+     return [
+       {
+diff --git a/package.json b/package.json
+index 54e543c..1481631 100644
+--- a/package.json
++++ b/package.json
+@@ -5,6 +5,8 @@
+   "scripts": {
+     "dev": "next dev",
+     "build": "next build",
++    "postbuild": "node scripts/check-bundle-budget.mjs",
++    "analyze": "ANALYZE=true next build",
+     "start": "next start",
+     "lint": "eslint"
+   },
+diff --git a/scripts/check-bundle-budget.mjs b/scripts/check-bundle-budget.mjs
+new file mode 100644
+index 0000000..6f80ac9
+--- /dev/null
++++ b/scripts/check-bundle-budget.mjs
+@@ -0,0 +1,83 @@
++#!/usr/bin/env node
++// DOC 6 §4/§10: "Bundle analysis — @next/bundle-analyzer в CI, бюджет на
++// размер чанков". Runs after `next build` and fails the build if the total
++// client JS or any single chunk grows past its budget, so regressions are
++// caught before they ship rather than noticed later in a Web Vitals
++// dashboard.
++//
++// Turbopack (this project's bundler) hashes chunk filenames without the
++// semantic "framework-"/"main-" prefixes Webpack used, so budgets here are
++// enforced per-chunk (catches one bloated chunk) and on the total (catches
++// death-by-a-thousand-cuts growth) rather than by filename pattern.
++//
++// Usage: runs automatically via `npm run build` (postbuild hook).
++
++import { readdirSync, statSync } from "node:fs";
++import { join } from "node:path";
++
++const CHUNKS_DIR = join(process.cwd(), ".next", "static", "chunks");
++
++// Calibrated with ~15% headroom over this app's current build. Bump these
++// deliberately when a real feature needs the room — not silently.
++const MAX_SINGLE_CHUNK_KB = 360;
++const MAX_TOTAL_KB = 1600;
++
++function walk(dir) {
++  let files = [];
++  for (const entry of readdirSync(dir, { withFileTypes: true })) {
++    const full = join(dir, entry.name);
++    if (entry.isDirectory()) {
++      files = files.concat(walk(full));
++    } else if (entry.name.endsWith(".js")) {
++      files.push(full);
++    }
++  }
++  return files;
++}
++
++function main() {
++  let files;
++  try {
++    files = walk(CHUNKS_DIR);
++  } catch {
++    console.warn(`[bundle-budget] ${CHUNKS_DIR} not found — run "next build" first. Skipping.`);
++    return;
++  }
++
++  const sizes = files.map((file) => ({
++    filename: file.split("/").pop(),
++    kb: statSync(file).size / 1024,
++  }));
++  const totalKb = sizes.reduce((sum, f) => sum + f.kb, 0);
++  const oversized = sizes.filter((f) => f.kb > MAX_SINGLE_CHUNK_KB);
++
++  const violations = [];
++  if (oversized.length > 0) {
++    violations.push(
++      ...oversized.map(
++        (f) => `  chunk ${f.filename}: ${f.kb.toFixed(1)} KB (budget ${MAX_SINGLE_CHUNK_KB} KB)`
++      )
++    );
++  }
++  if (totalKb > MAX_TOTAL_KB) {
++    violations.push(
++      `  total chunks: ${totalKb.toFixed(1)} KB (budget ${MAX_TOTAL_KB} KB)`
++    );
++  }
++
++  if (violations.length === 0) {
++    console.log(
++      `[bundle-budget] OK — ${files.length} chunks, ${totalKb.toFixed(1)} KB total (budget ${MAX_TOTAL_KB} KB).`
++    );
++    return;
++  }
++
++  console.error("[bundle-budget] Chunk size budget exceeded:");
++  violations.forEach((line) => console.error(line));
++  console.error(
++    "\nRun `npm run analyze` to inspect what pushed the bundle over budget."
++  );
++  process.exit(1);
++}
++
++main();
+diff --git a/src/app/(dashboard)/products/page.js b/src/app/(dashboard)/products/page.js
+index 94c06b7..c043194 100644
+--- a/src/app/(dashboard)/products/page.js
++++ b/src/app/(dashboard)/products/page.js
+@@ -1,5 +1,29 @@
+ import { ProductsPage } from "@/views/products/ui/ProductsPage";
+ 
+-export default function Page() {
+-  return <ProductsPage />;
++export const revalidate = 60;
++
++// DOC 6 §4: streaming SSR / RSC for the static part of the catalog — the
++// default (unfiltered, default-ordered) product list is public (backend
++// permission AllowAny, itself Redis-cached — see DOC 5 §8), so it's fetched
++// here on the server and streamed as part of the page instead of the client
++// mounting empty and firing its own request. Filtering/sorting stays fully
++// client-side via React Query, using this as `initialData` for the default
++// view only.
++async function fetchInitialProducts() {
++  const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
++  try {
++    const res = await fetch(`${apiUrl}/api/v1/credit-products`, {
++      next: { revalidate },
++    });
++    if (!res.ok) return null;
++    return await res.json();
++  } catch {
++    // Backend unreachable at build/request time — client will fetch as usual.
++    return null;
++  }
++}
++
++export default async function Page() {
++  const initialProducts = await fetchInitialProducts();
++  return <ProductsPage initialProducts={initialProducts} />;
+ }
+diff --git a/src/entities/application/model/useApplications.js b/src/entities/application/model/useApplications.js
+index 356405e..ebfd9ab 100644
+--- a/src/entities/application/model/useApplications.js
++++ b/src/entities/application/model/useApplications.js
+@@ -1,5 +1,6 @@
+ "use client";
+ 
++import { useCallback } from "react";
+ import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
+ import { applicationsApi } from "@/entities/application/api";
+ import { applicationKeys } from "@/entities/application/model/keys";
+@@ -22,6 +23,21 @@ export function useApplication(id) {
+   });
+ }
+ 
++// DOC 6 §4: prefetch application detail on row hover so the click feels instant.
++export function usePrefetchApplication() {
++  const qc = useQueryClient();
++  return useCallback(
++    (id) => {
++      qc.prefetchQuery({
++        queryKey: applicationKeys.detail(id),
++        queryFn: () => applicationsApi.get(id).then((r) => r.data),
++        staleTime: 30 * 1000,
++      });
++    },
++    [qc]
++  );
++}
++
+ export function useCreateApplication() {
+   const qc = useQueryClient();
+   return useMutation({
+diff --git a/src/entities/application/ui/ApplicationCard.js b/src/entities/application/ui/ApplicationCard.js
+index c1795f6..d0481a0 100644
+--- a/src/entities/application/ui/ApplicationCard.js
++++ b/src/entities/application/ui/ApplicationCard.js
+@@ -1,11 +1,20 @@
++"use client";
++
++import { memo } from "react";
+ import Link from "next/link";
+ import { Card } from "@/shared/ui/Card";
+ import { StatusBadge } from "./StatusBadge";
+ import { formatMoney } from "@/shared/lib/format";
++import { usePrefetchApplication } from "@/entities/application/model/useApplications";
++
++export const ApplicationCard = memo(function ApplicationCard({ application }) {
++  const prefetch = usePrefetchApplication();
+ 
+-export function ApplicationCard({ application }) {
+   return (
+-    <Link href={`/applications/${application.id}`}>
++    <Link
++      href={`/applications/${application.id}`}
++      onMouseEnter={() => prefetch(application.id)}
++    >
+       <Card className="flex flex-col gap-2 transition-shadow hover:shadow-md">
+         <div className="flex items-start justify-between gap-2">
+           <span className="font-semibold text-gray-900 dark:text-gray-100">
+@@ -27,4 +36,4 @@ export function ApplicationCard({ application }) {
+       </Card>
+     </Link>
+   );
+-}
++});
+diff --git a/src/entities/loan/model/useLoans.js b/src/entities/loan/model/useLoans.js
+index 191ee08..5faf891 100644
+--- a/src/entities/loan/model/useLoans.js
++++ b/src/entities/loan/model/useLoans.js
+@@ -1,6 +1,7 @@
+ "use client";
+ 
+-import { useQuery, keepPreviousData } from "@tanstack/react-query";
++import { useCallback } from "react";
++import { useQuery, useQueryClient, keepPreviousData } from "@tanstack/react-query";
+ import { loansApi } from "@/entities/loan/api";
+ import { loanKeys } from "@/entities/loan/model/keys";
+ 
+@@ -21,3 +22,18 @@ export function useLoan(id) {
+     staleTime: 30 * 1000,
+   });
+ }
++
++// DOC 6 §4: prefetch loan detail (incl. schedule) on row hover.
++export function usePrefetchLoan() {
++  const qc = useQueryClient();
++  return useCallback(
++    (id) => {
++      qc.prefetchQuery({
++        queryKey: loanKeys.detail(id),
++        queryFn: () => loansApi.get(id).then((r) => r.data),
++        staleTime: 30 * 1000,
++      });
++    },
++    [qc]
++  );
++}
+diff --git a/src/entities/loan/ui/LoanCard.js b/src/entities/loan/ui/LoanCard.js
+index 953f9a9..8a4c310 100644
+--- a/src/entities/loan/ui/LoanCard.js
++++ b/src/entities/loan/ui/LoanCard.js
+@@ -1,14 +1,19 @@
++"use client";
++
++import { memo } from "react";
+ import Link from "next/link";
+ import { Card } from "@/shared/ui/Card";
+ import { LoanStatusBadge } from "./LoanStatusBadge";
+ import { formatMoney } from "@/shared/lib/format";
+ import { getNextPayment } from "@/entities/loan/lib/format";
++import { usePrefetchLoan } from "@/entities/loan/model/useLoans";
+ 
+-export function LoanCard({ loan }) {
++export const LoanCard = memo(function LoanCard({ loan }) {
+   const nextPayment = getNextPayment(loan);
++  const prefetch = usePrefetchLoan();
+ 
+   return (
+-    <Link href={`/loans/${loan.id}`}>
++    <Link href={`/loans/${loan.id}`} onMouseEnter={() => prefetch(loan.id)}>
+       <Card className="flex flex-col gap-2 transition-shadow hover:shadow-md">
+         <div className="flex items-start justify-between gap-2">
+           <span className="font-semibold text-gray-900 dark:text-gray-100">
+@@ -28,4 +33,4 @@ export function LoanCard({ loan }) {
+       </Card>
+     </Link>
+   );
+-}
++});
+diff --git a/src/entities/loan/ui/ScheduleTable.js b/src/entities/loan/ui/ScheduleTable.js
+index 3bcca7b..3f95614 100644
+--- a/src/entities/loan/ui/ScheduleTable.js
++++ b/src/entities/loan/ui/ScheduleTable.js
+@@ -1,3 +1,7 @@
++"use client";
++
++import { memo, useRef } from "react";
++import { useVirtualizer } from "@tanstack/react-virtual";
+ import { Badge } from "@/shared/ui/Badge";
+ import { formatMoney } from "@/shared/lib/format";
+ 
+@@ -13,9 +17,113 @@ const ROW_CLASS = {
+   OVERDUE: "bg-red-50 dark:bg-red-900/10",
+ };
+ 
++// DOC 6 §4: below this size a plain <table> is cheaper to render and more
++// accessible (native table semantics); above it, virtualize so a 60+ payment
++// schedule stays smooth (AC-8: рендер виртуализирован, INP < 200ms).
++const VIRTUALIZE_THRESHOLD = 24;
++const ROW_HEIGHT = 41;
++const MAX_VIEWPORT_HEIGHT = 480;
++
++function scheduleRowLabel(item) {
++  const { label, variant } = STATUS_MAP[item.status] || {
++    label: item.status,
++    variant: "gray",
++  };
++  return { label, variant };
++}
++
++const ScheduleRow = memo(function ScheduleRow({ item }) {
++  const { label, variant } = scheduleRowLabel(item);
++  return (
++    <tr
++      className={`border-b border-gray-100 dark:border-gray-800 ${ROW_CLASS[item.status] || ""}`}
++    >
++      <td className="px-3 py-2 text-gray-700 dark:text-gray-300">{item.sequence}</td>
++      <td className="px-3 py-2 text-gray-700 dark:text-gray-300">
++        {new Date(item.due_date).toLocaleDateString("ru-RU")}
++      </td>
++      <td className="px-3 py-2 font-medium text-gray-900 dark:text-gray-100">
++        {formatMoney(item.amount)}
++      </td>
++      <td className="px-3 py-2">
++        <Badge variant={variant}>{label}</Badge>
++      </td>
++    </tr>
++  );
++});
++
++const ScheduleGridRow = memo(function ScheduleGridRow({ item }) {
++  const { label, variant } = scheduleRowLabel(item);
++  return (
++    <div
++      className={`grid grid-cols-[56px_1fr_1fr_120px] items-center gap-2 border-b border-gray-100 px-3 text-sm dark:border-gray-800 ${ROW_CLASS[item.status] || ""}`}
++      style={{ height: ROW_HEIGHT }}
++    >
++      <span className="text-gray-700 dark:text-gray-300">{item.sequence}</span>
++      <span className="text-gray-700 dark:text-gray-300">
++        {new Date(item.due_date).toLocaleDateString("ru-RU")}
++      </span>
++      <span className="font-medium text-gray-900 dark:text-gray-100">
++        {formatMoney(item.amount)}
++      </span>
++      <span>
++        <Badge variant={variant}>{label}</Badge>
++      </span>
++    </div>
++  );
++});
++
++function VirtualizedSchedule({ items }) {
++  const scrollRef = useRef(null);
++  const height = Math.min(items.length * ROW_HEIGHT, MAX_VIEWPORT_HEIGHT);
++
++  const rowVirtualizer = useVirtualizer({
++    count: items.length,
++    getScrollElement: () => scrollRef.current,
++    estimateSize: () => ROW_HEIGHT,
++    overscan: 10,
++  });
++
++  return (
++    <div className="overflow-hidden rounded-lg border border-gray-200 dark:border-gray-800">
++      <div className="grid grid-cols-[56px_1fr_1fr_120px] gap-2 border-b border-gray-200 bg-gray-50 px-3 py-2 text-xs font-medium uppercase text-gray-500 dark:border-gray-800 dark:bg-gray-800/50 dark:text-gray-400">
++        <span>#</span>
++        <span>Дата платежа</span>
++        <span>Сумма</span>
++        <span>Статус</span>
++      </div>
++      <div ref={scrollRef} style={{ height, overflow: "auto" }}>
++        <div style={{ height: rowVirtualizer.getTotalSize(), position: "relative" }}>
++          {rowVirtualizer.getVirtualItems().map((virtualRow) => {
++            const item = items[virtualRow.index];
++            return (
++              <div
++                key={item.id}
++                style={{
++                  position: "absolute",
++                  top: 0,
++                  left: 0,
++                  width: "100%",
++                  transform: `translateY(${virtualRow.start}px)`,
++                }}
++              >
++                <ScheduleGridRow item={item} />
++              </div>
++            );
++          })}
++        </div>
++      </div>
++    </div>
++  );
++}
++
+ export function ScheduleTable({ items }) {
+   if (!items?.length) return null;
+ 
++  if (items.length > VIRTUALIZE_THRESHOLD) {
++    return <VirtualizedSchedule items={items} />;
++  }
++
+   return (
+     <div className="overflow-x-auto">
+       <table className="w-full text-left text-sm">
+@@ -28,29 +136,9 @@ export function ScheduleTable({ items }) {
+           </tr>
+         </thead>
+         <tbody>
+-          {items.map((item) => {
+-            const { label, variant } = STATUS_MAP[item.status] || {
+-              label: item.status,
+-              variant: "gray",
+-            };
+-            return (
+-              <tr
+-                key={item.id}
+-                className={`border-b border-gray-100 dark:border-gray-800 ${ROW_CLASS[item.status] || ""}`}
+-              >
+-                <td className="px-3 py-2 text-gray-700 dark:text-gray-300">{item.sequence}</td>
+-                <td className="px-3 py-2 text-gray-700 dark:text-gray-300">
+-                  {new Date(item.due_date).toLocaleDateString("ru-RU")}
+-                </td>
+-                <td className="px-3 py-2 font-medium text-gray-900 dark:text-gray-100">
+-                  {formatMoney(item.amount)}
+-                </td>
+-                <td className="px-3 py-2">
+-                  <Badge variant={variant}>{label}</Badge>
+-                </td>
+-              </tr>
+-            );
+-          })}
++          {items.map((item) => (
++            <ScheduleRow key={item.id} item={item} />
++          ))}
+         </tbody>
+       </table>
+     </div>
+diff --git a/src/entities/notification/ui/NotificationItem.js b/src/entities/notification/ui/NotificationItem.js
+index 1b581ba..d8d87e1 100644
+--- a/src/entities/notification/ui/NotificationItem.js
++++ b/src/entities/notification/ui/NotificationItem.js
+@@ -1,7 +1,13 @@
++import { memo } from "react";
+ import { useRouter } from "next/navigation";
+ import { getNotificationLink } from "@/entities/notification/lib/getNotificationLink";
+ 
+-export function NotificationItem({ notification, onRead, compact = false, onAfterClick }) {
++export const NotificationItem = memo(function NotificationItem({
++  notification,
++  onRead,
++  compact = false,
++  onAfterClick,
++}) {
+   const router = useRouter();
+ 
+   const handleClick = () => {
+@@ -36,4 +42,4 @@ export function NotificationItem({ notification, onRead, compact = false, onAfte
+       </span>
+     </button>
+   );
+-}
++});
+diff --git a/src/entities/product/model/useProducts.js b/src/entities/product/model/useProducts.js
+index 841d042..73faf48 100644
+--- a/src/entities/product/model/useProducts.js
++++ b/src/entities/product/model/useProducts.js
+@@ -1,15 +1,17 @@
+ "use client";
+ 
+-import { useQuery, keepPreviousData } from "@tanstack/react-query";
++import { useCallback } from "react";
++import { useQuery, useQueryClient, keepPreviousData } from "@tanstack/react-query";
+ import { productsApi } from "@/entities/product/api";
+ import { productKeys } from "@/entities/product/model/keys";
+ 
+-export function useProducts(params) {
++export function useProducts(params, options = {}) {
+   return useQuery({
+     queryKey: productKeys.list(params),
+     queryFn: () => productsApi.list(params).then((r) => r.data),
+     staleTime: 5 * 60 * 1000,
+     placeholderData: keepPreviousData,
++    ...(options.initialData ? { initialData: options.initialData } : {}),
+   });
+ }
+ 
+@@ -21,3 +23,18 @@ export function useProduct(id) {
+     staleTime: 5 * 60 * 1000,
+   });
+ }
++
++// DOC 6 §4: prefetch product detail on card hover.
++export function usePrefetchProduct() {
++  const qc = useQueryClient();
++  return useCallback(
++    (id) => {
++      qc.prefetchQuery({
++        queryKey: productKeys.detail(id),
++        queryFn: () => productsApi.get(id).then((r) => r.data),
++        staleTime: 5 * 60 * 1000,
++      });
++    },
++    [qc]
++  );
++}
+diff --git a/src/entities/product/ui/ProductCard.js b/src/entities/product/ui/ProductCard.js
+index c48a41d..2867938 100644
+--- a/src/entities/product/ui/ProductCard.js
++++ b/src/entities/product/ui/ProductCard.js
+@@ -1,11 +1,20 @@
++"use client";
++
++import { memo } from "react";
+ import Link from "next/link";
+ import { Card } from "@/shared/ui/Card";
+ import { Badge } from "@/shared/ui/Badge";
+ import { formatMoney, formatRate } from "@/shared/lib/format";
++import { usePrefetchProduct } from "@/entities/product/model/useProducts";
++
++export const ProductCard = memo(function ProductCard({ product }) {
++  const prefetch = usePrefetchProduct();
+ 
+-export function ProductCard({ product }) {
+   return (
+-    <Link href={`/products/${product.id}`}>
++    <Link
++      href={`/products/${product.id}`}
++      onMouseEnter={() => prefetch(product.id)}
++    >
+       <Card className="flex h-full flex-col gap-3 transition-shadow hover:shadow-md">
+         <div className="flex items-start justify-between gap-2">
+           <h3 className="font-semibold text-gray-900 dark:text-gray-100">
+@@ -29,4 +38,4 @@ export function ProductCard({ product }) {
+       </Card>
+     </Link>
+   );
+-}
++});
+diff --git a/src/features/avatar-upload/ui/AvatarUpload.js b/src/features/avatar-upload/ui/AvatarUpload.js
+index 29eeaee..56cae64 100644
+--- a/src/features/avatar-upload/ui/AvatarUpload.js
++++ b/src/features/avatar-upload/ui/AvatarUpload.js
+@@ -1,15 +1,18 @@
+ "use client";
+ 
+ import { useState } from "react";
++import Image from "next/image";
+ import { useQueryClient } from "@tanstack/react-query";
+ import toast from "react-hot-toast";
+ import { profileApi } from "@/entities/user/api/profile";
++import { resolveMediaUrl } from "@/shared/lib/resolveMediaUrl";
+ 
+ const MAX_SIZE = 2 * 1024 * 1024;
+ const ALLOWED_TYPES = ["image/jpeg", "image/png"];
+ 
+ export default function AvatarUpload({ current }) {
+   const [preview, setPreview] = useState(current || null);
++  const [isBlobPreview, setIsBlobPreview] = useState(false);
+   const [isUploading, setUploading] = useState(false);
+   const qc = useQueryClient();
+ 
+@@ -29,10 +32,12 @@ export default function AvatarUpload({ current }) {
+ 
+     const objectUrl = URL.createObjectURL(file);
+     setPreview(objectUrl);
++    setIsBlobPreview(true);
+     setUploading(true);
+     try {
+       const { data } = await profileApi.uploadAvatar(file);
+       setPreview(data.avatar);
++      setIsBlobPreview(false);
+       qc.invalidateQueries({ queryKey: ["profile"] });
+       toast.success("Аватар обновлён");
+     } catch {
+@@ -43,12 +48,20 @@ export default function AvatarUpload({ current }) {
+     }
+   };
+ 
++  const src = resolveMediaUrl(preview);
++
+   return (
+     <div className="flex items-center gap-4">
+-      {preview ? (
+-        <img
+-          src={preview}
++      {src ? (
++        // DOC 6 §4: next/image gives lazy loading + automatic WebP/AVIF for the
++        // persisted avatar. The transient local blob: preview during upload is
++        // rendered unoptimized (next/image can't run Next's image loader on it).
++        <Image
++          src={src}
+           alt="Аватар"
++          width={96}
++          height={96}
++          unoptimized={isBlobPreview}
+           className="h-24 w-24 rounded-full object-cover"
+         />
+       ) : (
+diff --git a/src/shared/lib/resolveMediaUrl.js b/src/shared/lib/resolveMediaUrl.js
+new file mode 100644
+index 0000000..8a76292
+--- /dev/null
++++ b/src/shared/lib/resolveMediaUrl.js
+@@ -0,0 +1,12 @@
++// DOC 6 §4: DRF's ImageField.url can be relative ("/media/avatars/x.jpg") or
++// already absolute depending on whether the request had a scheme/host in
++// context. next/image needs an absolute URL (or a path matching a configured
++// remote pattern) to optimize it, so normalize here.
++export function resolveMediaUrl(url) {
++  if (!url) return null;
++  if (/^https?:\/\//i.test(url) || url.startsWith("blob:") || url.startsWith("data:")) {
++    return url;
++  }
++  const base = process.env.NEXT_PUBLIC_API_URL || "";
++  return `${base}${url.startsWith("/") ? "" : "/"}${url}`;
++}
+diff --git a/src/views/products/ui/ProductsPage.js b/src/views/products/ui/ProductsPage.js
+index 4a30cb8..f12c8e1 100644
+--- a/src/views/products/ui/ProductsPage.js
++++ b/src/views/products/ui/ProductsPage.js
+@@ -6,12 +6,25 @@ import { ProductFilters } from "@/widgets/product-catalog/ui/ProductFilters";
+ import { ProductList } from "@/widgets/product-catalog/ui/ProductList";
+ import { WidgetErrorBoundary } from "@/shared/lib/ErrorBoundary";
+ 
+-export function ProductsPage() {
++const DEFAULT_ORDERING = "-created_at";
++
++// DOC 6 §4: `initialProducts` comes from the server component in
++// app/(dashboard)/products/page.js (RSC fetch of the public, unfiltered,
++// default-ordered catalog). It's only wired in as React Query `initialData`
++// while the filters are still at that same default state — the moment the
++// person searches or re-sorts, the query key changes and this stops applying,
++// so it never masks stale filtered results.
++export function ProductsPage({ initialProducts } = {}) {
+   const [search, setSearch] = useState("");
+-  const [ordering, setOrdering] = useState("-created_at");
++  const [ordering, setOrdering] = useState(DEFAULT_ORDERING);
+   const [page, setPage] = useState(1);
+ 
+-  const { data, isLoading, isError, refetch } = useProducts({ search, ordering, page });
++  const isDefaultView = !search && ordering === DEFAULT_ORDERING && page === 1;
++
++  const { data, isLoading, isError, refetch } = useProducts(
++    { search, ordering, page },
++    { initialData: isDefaultView ? initialProducts ?? undefined : undefined }
++  );
+ 
+   const handleSearchChange = (value) => {
+     setSearch(value);
+@@ -39,7 +52,7 @@ export function ProductsPage() {
+       <WidgetErrorBoundary name="product-list">
+         <ProductList
+           data={data}
+-          isLoading={isLoading}
++          isLoading={isLoading && !data}
+           isError={isError}
+           page={page}
+           onPageChange={setPage}
+diff --git a/src/widgets/admin-audit-table/ui/AuditFilters.js b/src/widgets/admin-audit-table/ui/AuditFilters.js
+index 8b033d7..e4fe306 100644
+--- a/src/widgets/admin-audit-table/ui/AuditFilters.js
++++ b/src/widgets/admin-audit-table/ui/AuditFilters.js
+@@ -1,25 +1,55 @@
++"use client";
++
++import { useEffect, useState } from "react";
++import { useDebouncedValue } from "@/shared/lib/useDebouncedValue";
+ import { Input } from "@/shared/ui/Input";
+ 
++// DOC 6 §4: debounce the free-text fields (actor / action / object type) so
++// each keystroke doesn't trigger a fresh audit-log request; date pickers fire
++// immediately since they're discrete selections, not typed streams.
+ export function AuditFilters({ filters, onFieldChange }) {
++  const [actorInput, setActorInput] = useState(filters.actor || "");
++  const [actionInput, setActionInput] = useState(filters.action || "");
++  const [objectTypeInput, setObjectTypeInput] = useState(filters.object_type || "");
++
++  const debouncedActor = useDebouncedValue(actorInput);
++  const debouncedAction = useDebouncedValue(actionInput);
++  const debouncedObjectType = useDebouncedValue(objectTypeInput);
++
++  useEffect(() => {
++    onFieldChange("actor", debouncedActor || undefined);
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [debouncedActor]);
++
++  useEffect(() => {
++    onFieldChange("action", debouncedAction || undefined);
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [debouncedAction]);
++
++  useEffect(() => {
++    onFieldChange("object_type", debouncedObjectType || undefined);
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [debouncedObjectType]);
++
+   return (
+     <div className="flex flex-wrap items-end gap-4">
+       <Input
+         label="ID автора"
+         type="number"
+-        value={filters.actor || ""}
+-        onChange={(e) => onFieldChange("actor", e.target.value || undefined)}
++        value={actorInput}
++        onChange={(e) => setActorInput(e.target.value)}
+       />
+       <Input
+         label="Действие"
+         placeholder="application.approved"
+-        value={filters.action || ""}
+-        onChange={(e) => onFieldChange("action", e.target.value || undefined)}
++        value={actionInput}
++        onChange={(e) => setActionInput(e.target.value)}
+       />
+       <Input
+         label="Тип объекта"
+         placeholder="CreditApplication"
+-        value={filters.object_type || ""}
+-        onChange={(e) => onFieldChange("object_type", e.target.value || undefined)}
++        value={objectTypeInput}
++        onChange={(e) => setObjectTypeInput(e.target.value)}
+       />
+       <Input
+         label="Дата с"
+diff --git a/src/widgets/admin-audit-table/ui/AuditTable.js b/src/widgets/admin-audit-table/ui/AuditTable.js
+index c42aaea..bafe62e 100644
+--- a/src/widgets/admin-audit-table/ui/AuditTable.js
++++ b/src/widgets/admin-audit-table/ui/AuditTable.js
+@@ -1,6 +1,6 @@
+ "use client";
+ 
+-import { Fragment, useState } from "react";
++import { Fragment, memo, useCallback, useState } from "react";
+ import { ChevronDown, ChevronUp } from "lucide-react";
+ import { AdminTable } from "@/widgets/admin-application-table/ui/AdminTable";
+ 
+@@ -12,9 +12,54 @@ const COLUMNS = [
+   { key: "expand", label: "" },
+ ];
+ 
++// DOC 6 §4: memoized row — expanding one entry's diff shouldn't re-render
++// every other row in a long audit log page.
++const AuditRow = memo(function AuditRow({ log, isExpanded, onToggle }) {
++  return (
++    <Fragment>
++      <tr>
++        <td className="whitespace-nowrap px-4 py-3 text-gray-500 dark:text-gray-400">
++          {new Date(log.created_at).toLocaleString("ru-RU")}
++        </td>
++        <td className="px-4 py-3 text-gray-700 dark:text-gray-300">
++          {log.actor_email || "система"}
++        </td>
++        <td className="px-4 py-3 font-medium text-gray-900 dark:text-gray-100">
++          {log.action}
++        </td>
++        <td className="px-4 py-3 text-gray-700 dark:text-gray-300">
++          {log.object_type} #{log.object_id}
++        </td>
++        <td className="px-4 py-3 text-right">
++          <button
++            onClick={() => onToggle(log.id)}
++            className="text-gray-500 hover:text-gray-700 dark:hover:text-gray-300"
++            aria-label="Показать изменения"
++          >
++            {isExpanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
++          </button>
++        </td>
++      </tr>
++      {isExpanded && (
++        <tr>
++          <td colSpan={5} className="bg-gray-50 px-4 py-3 dark:bg-gray-800/50">
++            <pre className="overflow-x-auto text-xs text-gray-700 dark:text-gray-300">
++              {JSON.stringify(log.changes, null, 2)}
++            </pre>
++          </td>
++        </tr>
++      )}
++    </Fragment>
++  );
++});
++
+ export default function AuditTable({ data, isLoading, isError, onRetry, page, onPageChange }) {
+   const [expandedId, setExpandedId] = useState(null);
+ 
++  const toggle = useCallback((id) => {
++    setExpandedId((current) => (current === id ? null : id));
++  }, []);
++
+   return (
+     <AdminTable
+       columns={COLUMNS}
+@@ -25,45 +70,9 @@ export default function AuditTable({ data, isLoading, isError, onRetry, page, on
+       page={page}
+       onPageChange={onPageChange}
+       emptyTitle="Записей не найдено"
+-      renderRow={(log) => {
+-        const isExpanded = expandedId === log.id;
+-        return (
+-          <Fragment key={log.id}>
+-            <tr>
+-              <td className="whitespace-nowrap px-4 py-3 text-gray-500 dark:text-gray-400">
+-                {new Date(log.created_at).toLocaleString("ru-RU")}
+-              </td>
+-              <td className="px-4 py-3 text-gray-700 dark:text-gray-300">
+-                {log.actor_email || "система"}
+-              </td>
+-              <td className="px-4 py-3 font-medium text-gray-900 dark:text-gray-100">
+-                {log.action}
+-              </td>
+-              <td className="px-4 py-3 text-gray-700 dark:text-gray-300">
+-                {log.object_type} #{log.object_id}
+-              </td>
+-              <td className="px-4 py-3 text-right">
+-                <button
+-                  onClick={() => setExpandedId(isExpanded ? null : log.id)}
+-                  className="text-gray-500 hover:text-gray-700 dark:hover:text-gray-300"
+-                  aria-label="Показать изменения"
+-                >
+-                  {isExpanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+-                </button>
+-              </td>
+-            </tr>
+-            {isExpanded && (
+-              <tr>
+-                <td colSpan={5} className="bg-gray-50 px-4 py-3 dark:bg-gray-800/50">
+-                  <pre className="overflow-x-auto text-xs text-gray-700 dark:text-gray-300">
+-                    {JSON.stringify(log.changes, null, 2)}
+-                  </pre>
+-                </td>
+-              </tr>
+-            )}
+-          </Fragment>
+-        );
+-      }}
++      renderRow={(log) => (
++        <AuditRow key={log.id} log={log} isExpanded={expandedId === log.id} onToggle={toggle} />
++      )}
+     />
+   );
+ }
+diff --git a/src/widgets/admin-products-table/ui/ProductsTable.js b/src/widgets/admin-products-table/ui/ProductsTable.js
+index f7c757c..560f951 100644
+--- a/src/widgets/admin-products-table/ui/ProductsTable.js
++++ b/src/widgets/admin-products-table/ui/ProductsTable.js
+@@ -1,3 +1,4 @@
++import { memo } from "react";
+ import { Badge } from "@/shared/ui/Badge";
+ import { Button } from "@/shared/ui/Button";
+ import { AdminTable } from "@/widgets/admin-application-table/ui/AdminTable";
+@@ -12,6 +13,45 @@ const COLUMNS = [
+   { key: "actions", label: "" },
+ ];
+ 
++// DOC 6 §4: memoized row — deactivating one product shouldn't re-render the
++// rest of the (potentially large) admin catalog.
++const ProductRow = memo(function ProductRow({ product, deactivating, onEdit, onDeactivate }) {
++  return (
++    <tr>
++      <td className="px-4 py-3">
++        <div className="font-medium text-gray-900 dark:text-gray-100">{product.name}</div>
++        <div className="text-xs text-gray-500 dark:text-gray-400">{product.slug}</div>
++      </td>
++      <td className="px-4 py-3 text-gray-700 dark:text-gray-300">
++        {formatMoney(product.min_amount)} – {formatMoney(product.max_amount)}
++      </td>
++      <td className="px-4 py-3 text-gray-700 dark:text-gray-300">
++        {formatRate(product.interest_rate)}
++      </td>
++      <td className="px-4 py-3 text-gray-700 dark:text-gray-300">
++        {product.min_term_months}–{product.max_term_months} мес.
++      </td>
++      <td className="px-4 py-3">
++        <Badge variant={product.is_active ? "green" : "gray"}>
++          {product.is_active ? "Активен" : "Неактивен"}
++        </Badge>
++      </td>
++      <td className="px-4 py-3">
++        <div className="flex justify-end gap-2">
++          <Button variant="secondary" onClick={() => onEdit(product)}>
++            Редактировать
++          </Button>
++          {product.is_active && (
++            <Button variant="danger" disabled={deactivating} onClick={() => onDeactivate(product.id)}>
++              Деактивировать
++            </Button>
++          )}
++        </div>
++      </td>
++    </tr>
++  );
++});
++
+ export function ProductsTable({
+   data,
+   isLoading,
+@@ -34,42 +74,13 @@ export function ProductsTable({
+       onPageChange={onPageChange}
+       emptyTitle="Продуктов пока нет"
+       renderRow={(product) => (
+-        <tr key={product.id}>
+-          <td className="px-4 py-3">
+-            <div className="font-medium text-gray-900 dark:text-gray-100">{product.name}</div>
+-            <div className="text-xs text-gray-500 dark:text-gray-400">{product.slug}</div>
+-          </td>
+-          <td className="px-4 py-3 text-gray-700 dark:text-gray-300">
+-            {formatMoney(product.min_amount)} – {formatMoney(product.max_amount)}
+-          </td>
+-          <td className="px-4 py-3 text-gray-700 dark:text-gray-300">
+-            {formatRate(product.interest_rate)}
+-          </td>
+-          <td className="px-4 py-3 text-gray-700 dark:text-gray-300">
+-            {product.min_term_months}–{product.max_term_months} мес.
+-          </td>
+-          <td className="px-4 py-3">
+-            <Badge variant={product.is_active ? "green" : "gray"}>
+-              {product.is_active ? "Активен" : "Неактивен"}
+-            </Badge>
+-          </td>
+-          <td className="px-4 py-3">
+-            <div className="flex justify-end gap-2">
+-              <Button variant="secondary" onClick={() => onEdit(product)}>
+-                Редактировать
+-              </Button>
+-              {product.is_active && (
+-                <Button
+-                  variant="danger"
+-                  disabled={deactivatingId === product.id}
+-                  onClick={() => onDeactivate(product.id)}
+-                >
+-                  Деактивировать
+-                </Button>
+-              )}
+-            </div>
+-          </td>
+-        </tr>
++        <ProductRow
++          key={product.id}
++          product={product}
++          deactivating={deactivatingId === product.id}
++          onEdit={onEdit}
++          onDeactivate={onDeactivate}
++        />
+       )}
+     />
+   );
+diff --git a/src/widgets/admin-users-table/ui/UsersTable.js b/src/widgets/admin-users-table/ui/UsersTable.js
+index 9bb0438..5eac64b 100644
+--- a/src/widgets/admin-users-table/ui/UsersTable.js
++++ b/src/widgets/admin-users-table/ui/UsersTable.js
+@@ -1,3 +1,4 @@
++import { memo } from "react";
+ import { Badge } from "@/shared/ui/Badge";
+ import { AdminTable } from "@/widgets/admin-application-table/ui/AdminTable";
+ import { RoleSelect } from "@/entities/user/ui/RoleSelect";
+@@ -9,6 +10,31 @@ const COLUMNS = [
+   { key: "created", label: "Создан" },
+ ];
+ 
++// DOC 6 §4: memoized row so changing one user's role doesn't re-render the
++// whole page of rows.
++const UserRow = memo(function UserRow({ user, disabled, onRoleChange }) {
++  return (
++    <tr>
++      <td className="px-4 py-3 font-medium text-gray-900 dark:text-gray-100">{user.email}</td>
++      <td className="px-4 py-3">
++        <RoleSelect
++          value={user.role}
++          disabled={disabled}
++          onChange={(role) => onRoleChange(user.id, role)}
++        />
++      </td>
++      <td className="px-4 py-3">
++        <Badge variant={user.is_active ? "green" : "gray"}>
++          {user.is_active ? "Активен" : "Неактивен"}
++        </Badge>
++      </td>
++      <td className="px-4 py-3 text-gray-500 dark:text-gray-400">
++        {new Date(user.created_at).toLocaleDateString("ru-RU")}
++      </td>
++    </tr>
++  );
++});
++
+ export function UsersTable({ data, isLoading, isError, onRetry, page, onPageChange, onRoleChange, changingId }) {
+   return (
+     <AdminTable
+@@ -21,24 +47,12 @@ export function UsersTable({ data, isLoading, isError, onRetry, page, onPageChan
+       onPageChange={onPageChange}
+       emptyTitle="Пользователи не найдены"
+       renderRow={(user) => (
+-        <tr key={user.id}>
+-          <td className="px-4 py-3 font-medium text-gray-900 dark:text-gray-100">{user.email}</td>
+-          <td className="px-4 py-3">
+-            <RoleSelect
+-              value={user.role}
+-              disabled={changingId === user.id}
+-              onChange={(role) => onRoleChange(user.id, role)}
+-            />
+-          </td>
+-          <td className="px-4 py-3">
+-            <Badge variant={user.is_active ? "green" : "gray"}>
+-              {user.is_active ? "Активен" : "Неактивен"}
+-            </Badge>
+-          </td>
+-          <td className="px-4 py-3 text-gray-500 dark:text-gray-400">
+-            {new Date(user.created_at).toLocaleDateString("ru-RU")}
+-          </td>
+-        </tr>
++        <UserRow
++          key={user.id}
++          user={user}
++          disabled={changingId === user.id}
++          onRoleChange={onRoleChange}
++        />
+       )}
+     />
+   );
+diff --git a/src/widgets/product-catalog/ui/ProductFilters.js b/src/widgets/product-catalog/ui/ProductFilters.js
+index 2e231cb..0d1f224 100644
+--- a/src/widgets/product-catalog/ui/ProductFilters.js
++++ b/src/widgets/product-catalog/ui/ProductFilters.js
+@@ -1,3 +1,7 @@
++"use client";
++
++import { useEffect, useState } from "react";
++import { useDebouncedValue } from "@/shared/lib/useDebouncedValue";
+ import { Input } from "@/shared/ui/Input";
+ 
+ const ORDERING_OPTIONS = [
+@@ -7,15 +11,24 @@ const ORDERING_OPTIONS = [
+   { value: "-max_amount", label: "Сумма ↓" },
+ ];
+ 
++// DOC 6 §4: debounce the search field so typing doesn't fire a request per keystroke.
+ export function ProductFilters({ search, ordering, onSearchChange, onOrderingChange }) {
++  const [searchInput, setSearchInput] = useState(search || "");
++  const debouncedSearch = useDebouncedValue(searchInput);
++
++  useEffect(() => {
++    if (debouncedSearch !== search) onSearchChange(debouncedSearch);
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, [debouncedSearch]);
++
+   return (
+     <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+       <div className="flex-1">
+         <Input
+           label="Поиск"
+           placeholder="Название продукта"
+-          value={search}
+-          onChange={(e) => onSearchChange(e.target.value)}
++          value={searchInput}
++          onChange={(e) => setSearchInput(e.target.value)}
+         />
+       </div>
+       <div className="flex flex-col gap-1">
