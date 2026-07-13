@@ -101,6 +101,89 @@ class LoginRefreshTests(TestCase):
         self.assertEqual(r.data["error"]["code"], "TOKEN_EXPIRED")
 
 
+class CookieAuthTests(TestCase):
+    """DOC 6 §3: refresh lives in an httpOnly cookie; access stays in the body
+    for the frontend to hold in memory. Legacy body-refresh (Junior/Middle)
+    must keep working untouched.
+    """
+
+    def setUp(self):
+        self.client = APIClient(enforce_csrf_checks=True)
+        User.objects.create_user(email="a@b.com", password="StrongPass123")
+
+    def login(self):
+        return self.client.post(
+            "/api/v1/auth/login",
+            {"email": "a@b.com", "password": "StrongPass123"},
+        )
+
+    def test_login_sets_httponly_refresh_cookie(self):
+        r = self.login()
+        self.assertEqual(r.status_code, 200)
+        cookie = r.cookies["cf_refresh_token"]
+        self.assertEqual(cookie.value, r.data["refresh"])
+        self.assertTrue(cookie["httponly"])
+        self.assertEqual(cookie["samesite"], "Strict")
+
+    def test_login_sets_csrf_cookie(self):
+        r = self.login()
+        self.assertIn("csrftoken", r.cookies)
+
+    def test_refresh_via_cookie_with_csrf_token_succeeds(self):
+        self.login()
+        csrf_token = self.client.cookies["csrftoken"].value
+        r = self.client.post(
+            "/api/v1/auth/refresh",
+            {},
+            format="json",
+            HTTP_X_CSRFTOKEN=csrf_token,
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("access", r.data)
+        self.assertNotIn("refresh", r.data)
+
+    def test_refresh_via_cookie_without_csrf_token_returns_403(self):
+        self.login()
+        r = self.client.post("/api/v1/auth/refresh", {}, format="json")
+        self.assertEqual(r.status_code, 403)
+
+    def test_refresh_without_cookie_or_body_returns_401(self):
+        r = self.client.post("/api/v1/auth/refresh", {}, format="json")
+        self.assertEqual(r.status_code, 401)
+
+    def test_legacy_body_refresh_still_works_without_csrf_token(self):
+        login = self.login()
+        r = self.client.post(
+            "/api/v1/auth/refresh",
+            {"refresh": login.data["refresh"]},
+            format="json",
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("access", r.data)
+
+    def test_logout_clears_refresh_cookie(self):
+        self.login()
+        csrf_token = self.client.cookies["csrftoken"].value
+        r = self.client.post(
+            "/api/v1/auth/logout",
+            {},
+            format="json",
+            HTTP_X_CSRFTOKEN=csrf_token,
+        )
+        self.assertEqual(r.status_code, 204)
+        self.assertEqual(r.cookies["cf_refresh_token"].value, "")
+
+    def test_logout_without_csrf_token_returns_403(self):
+        self.login()
+        r = self.client.post("/api/v1/auth/logout", {}, format="json")
+        self.assertEqual(r.status_code, 403)
+
+    def test_logout_without_prior_login_is_a_noop(self):
+        anon = APIClient(enforce_csrf_checks=True)
+        r = anon.post("/api/v1/auth/logout", {}, format="json")
+        self.assertEqual(r.status_code, 204)
+
+
 class ProfileTests(TestCase):
     def setUp(self):
         self.user = register_user(email="a@b.com", password="StrongPass123")

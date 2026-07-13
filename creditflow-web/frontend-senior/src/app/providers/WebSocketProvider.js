@@ -1,7 +1,7 @@
 "use client";
 
 import { createContext, useEffect, useRef, useState } from "react";
-import { getTokens } from "@/shared/api/tokenStorage";
+import { getAccess } from "@/shared/api/authStore";
 import { useAuth } from "@/entities/user/model/useAuth";
 
 export const WSContext = createContext(null);
@@ -18,7 +18,7 @@ export function WebSocketProvider({ children }) {
     let reconnectTimer = null;
 
     const connect = () => {
-      const { access } = getTokens();
+      const access = getAccess();
       const url = `${process.env.NEXT_PUBLIC_WS_URL}/ws/notifications/?token=${access}`;
       const ws = new WebSocket(url);
       wsRef.current = ws;

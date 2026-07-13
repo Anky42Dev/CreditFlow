@@ -64,6 +64,19 @@ CORS_ALLOWED_ORIGINS = config(
 )
 CORS_ALLOW_CREDENTIALS = True
 
+# httpOnly refresh cookie + CSRF (DOC 6 §3 — Frontend Senior token security)
+REFRESH_COOKIE_NAME = "cf_refresh_token"
+REFRESH_COOKIE_SECURE = config("REFRESH_COOKIE_SECURE", default=not DEBUG, cast=bool)
+
+CSRF_TRUSTED_ORIGINS = config(
+    "CSRF_TRUSTED_ORIGINS",
+    default="http://localhost:3000,http://127.0.0.1:3000",
+    cast=Csv(),
+)
+CSRF_COOKIE_SAMESITE = "Strict"
+CSRF_COOKIE_SECURE = REFRESH_COOKIE_SECURE
+CSRF_COOKIE_HTTPONLY = False  # must be JS-readable for double-submit header
+
 ROOT_URLCONF = "config.urls"
 
 TEMPLATES = [
