@@ -3,6 +3,7 @@ import { Toaster } from "react-hot-toast";
 import QueryProvider from "@/app/providers/QueryProvider";
 import ThemeProvider from "@/app/providers/ThemeProvider";
 import { AuthProvider } from "@/app/providers/AuthProvider";
+import { FeatureFlagsProvider } from "@/app/providers/FeatureFlagsProvider";
 import { WebSocketProvider } from "@/app/providers/WebSocketProvider";
 import { RootErrorBoundary } from "@/shared/lib/ErrorBoundary";
 import "./globals.css";
@@ -33,10 +34,15 @@ export default function RootLayout({ children }) {
           <ThemeProvider>
             <QueryProvider>
               <AuthProvider>
-                <WebSocketProvider>
-                  {children}
-                  <Toaster position="top-right" />
-                </WebSocketProvider>
+                {/* DOC 6 §6: flags are personalized, so this must sit
+                    below AuthProvider (access token already in memory)
+                    and above anything that wants useFlag(). */}
+                <FeatureFlagsProvider>
+                  <WebSocketProvider>
+                    {children}
+                    <Toaster position="top-right" />
+                  </WebSocketProvider>
+                </FeatureFlagsProvider>
               </AuthProvider>
             </QueryProvider>
           </ThemeProvider>

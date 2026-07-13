@@ -20,6 +20,7 @@ import { Card } from "@/shared/ui/Card";
 import { DetailSkeleton } from "@/shared/ui/Skeleton";
 import { ErrorState } from "@/shared/ui/ErrorState";
 import { StatusBadge } from "@/entities/application/ui/StatusBadge";
+import { InstantDisburseBanner } from "./InstantDisburseBanner";
 
 export function ApplicationDetail({ id }) {
   const router = useRouter();
@@ -181,6 +182,7 @@ export function ApplicationDetail({ id }) {
         </Card>
       ) : (
         <Card className="space-y-4">
+          <InstantDisburseBanner status={application.status} />
           {product && (
             <p className="text-sm text-gray-600 dark:text-gray-400">
               Продукт: {product.name} ({product.interest_rate}%)
