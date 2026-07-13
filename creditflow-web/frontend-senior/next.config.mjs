@@ -1,3 +1,9 @@
+import withBundleAnalyzerFactory from "@next/bundle-analyzer";
+
+const withBundleAnalyzer = withBundleAnalyzerFactory({
+  enabled: process.env.ANALYZE === "true",
+});
+
 const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 const wsUrl = process.env.NEXT_PUBLIC_WS_URL || "ws://localhost:8000";
 const isDev = process.env.NODE_ENV === "development";
@@ -45,4 +51,4 @@ const nextConfig = {
   },
 };
 
-export default nextConfig;
+export default withBundleAnalyzer(nextConfig);
