@@ -9,6 +9,7 @@ import { PERMISSIONS } from "@/shared/config/permissions";
 import { AdminSidebar } from "@/widgets/admin-sidebar/ui/AdminSidebar";
 import { Header } from "@/widgets/header/ui/Header";
 import { Loader } from "@/shared/ui/Loader";
+import { RouteErrorBoundary } from "@/shared/lib/ErrorBoundary";
 
 export default function AdminLayout({ children }) {
   const { user, isLoading } = useAuth();
@@ -34,7 +35,9 @@ export default function AdminLayout({ children }) {
       <AdminSidebar open={sidebarOpen} onClose={() => setSidebarOpen(false)} />
       <div className="flex flex-1 flex-col">
         <Header onMenuClick={() => setSidebarOpen(true)} />
-        <main className="flex-1 p-6">{children}</main>
+        <main className="flex-1 p-6">
+          <RouteErrorBoundary>{children}</RouteErrorBoundary>
+        </main>
       </div>
     </div>
   );

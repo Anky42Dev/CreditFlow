@@ -9,6 +9,7 @@ import { useAdminUsers, useChangeUserRole } from "@/entities/user/model/useAdmin
 import { UsersTable } from "@/widgets/admin-users-table/ui/UsersTable";
 import { Input } from "@/shared/ui/Input";
 import { DetailSkeleton } from "@/shared/ui/Skeleton";
+import { WidgetErrorBoundary } from "@/shared/lib/ErrorBoundary";
 
 export function AdminUsersPage() {
   const allowed = useRequirePermission(PERMISSIONS.USER_MANAGE);
@@ -42,16 +43,18 @@ export function AdminUsersPage() {
         }}
         className="max-w-xs"
       />
-      <UsersTable
-        data={data}
-        isLoading={isLoading}
-        isError={isError}
-        onRetry={refetch}
-        page={page}
-        onPageChange={setPage}
-        onRoleChange={onRoleChange}
-        changingId={changeRole.isPending ? changeRole.variables?.id : null}
-      />
+      <WidgetErrorBoundary name="admin-users-table">
+        <UsersTable
+          data={data}
+          isLoading={isLoading}
+          isError={isError}
+          onRetry={refetch}
+          page={page}
+          onPageChange={setPage}
+          onRoleChange={onRoleChange}
+          changingId={changeRole.isPending ? changeRole.variables?.id : null}
+        />
+      </WidgetErrorBoundary>
     </div>
   );
 }

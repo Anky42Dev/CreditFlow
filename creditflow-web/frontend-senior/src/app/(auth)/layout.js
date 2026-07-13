@@ -4,6 +4,7 @@ import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/entities/user/model/useAuth";
 import { Loader } from "@/shared/ui/Loader";
+import { RouteErrorBoundary } from "@/shared/lib/ErrorBoundary";
 
 export default function AuthLayout({ children }) {
   const { user, isLoading } = useAuth();
@@ -18,7 +19,9 @@ export default function AuthLayout({ children }) {
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-gray-50 p-4 dark:bg-gray-950">
-      <div className="w-full max-w-sm">{children}</div>
+      <div className="w-full max-w-sm">
+        <RouteErrorBoundary>{children}</RouteErrorBoundary>
+      </div>
     </div>
   );
 }

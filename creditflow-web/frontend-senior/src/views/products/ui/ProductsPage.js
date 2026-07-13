@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useProducts } from "@/entities/product/model/useProducts";
 import { ProductFilters } from "@/widgets/product-catalog/ui/ProductFilters";
 import { ProductList } from "@/widgets/product-catalog/ui/ProductList";
+import { WidgetErrorBoundary } from "@/shared/lib/ErrorBoundary";
 
 export function ProductsPage() {
   const [search, setSearch] = useState("");
@@ -27,20 +28,24 @@ export function ProductsPage() {
       <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">
         Кредитные продукты
       </h1>
-      <ProductFilters
-        search={search}
-        ordering={ordering}
-        onSearchChange={handleSearchChange}
-        onOrderingChange={handleOrderingChange}
-      />
-      <ProductList
-        data={data}
-        isLoading={isLoading}
-        isError={isError}
-        page={page}
-        onPageChange={setPage}
-        onRetry={refetch}
-      />
+      <WidgetErrorBoundary name="product-filters">
+        <ProductFilters
+          search={search}
+          ordering={ordering}
+          onSearchChange={handleSearchChange}
+          onOrderingChange={handleOrderingChange}
+        />
+      </WidgetErrorBoundary>
+      <WidgetErrorBoundary name="product-list">
+        <ProductList
+          data={data}
+          isLoading={isLoading}
+          isError={isError}
+          page={page}
+          onPageChange={setPage}
+          onRetry={refetch}
+        />
+      </WidgetErrorBoundary>
     </div>
   );
 }

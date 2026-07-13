@@ -4,6 +4,7 @@ import { Menu, LogOut } from "lucide-react";
 import { useAuth } from "@/entities/user/model/useAuth";
 import { ThemeToggle } from "@/shared/ui/ThemeToggle";
 import { NotificationBell } from "@/widgets/notification-bell/ui/NotificationBell";
+import { WidgetErrorBoundary } from "@/shared/lib/ErrorBoundary";
 
 export function Header({ onMenuClick }) {
   const { user, logout } = useAuth();
@@ -18,7 +19,9 @@ export function Header({ onMenuClick }) {
         <Menu size={20} />
       </button>
       <div className="ml-auto flex items-center gap-2">
-        <NotificationBell />
+        <WidgetErrorBoundary name="notification-bell">
+          <NotificationBell />
+        </WidgetErrorBoundary>
         <ThemeToggle />
         {user && (
           <button

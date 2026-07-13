@@ -4,6 +4,7 @@ import QueryProvider from "@/app/providers/QueryProvider";
 import ThemeProvider from "@/app/providers/ThemeProvider";
 import { AuthProvider } from "@/app/providers/AuthProvider";
 import { WebSocketProvider } from "@/app/providers/WebSocketProvider";
+import { RootErrorBoundary } from "@/shared/lib/ErrorBoundary";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -28,16 +29,18 @@ export default function RootLayout({ children }) {
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col">
-        <ThemeProvider>
-          <QueryProvider>
-            <AuthProvider>
-              <WebSocketProvider>
-                {children}
-                <Toaster position="top-right" />
-              </WebSocketProvider>
-            </AuthProvider>
-          </QueryProvider>
-        </ThemeProvider>
+        <RootErrorBoundary>
+          <ThemeProvider>
+            <QueryProvider>
+              <AuthProvider>
+                <WebSocketProvider>
+                  {children}
+                  <Toaster position="top-right" />
+                </WebSocketProvider>
+              </AuthProvider>
+            </QueryProvider>
+          </ThemeProvider>
+        </RootErrorBoundary>
       </body>
     </html>
   );

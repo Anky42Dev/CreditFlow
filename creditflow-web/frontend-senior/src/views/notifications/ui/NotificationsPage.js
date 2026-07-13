@@ -9,6 +9,7 @@ import {
 import { NotificationFilters } from "@/widgets/notification-list/ui/NotificationFilters";
 import { NotificationList } from "@/widgets/notification-list/ui/NotificationList";
 import { Button } from "@/shared/ui/Button";
+import { WidgetErrorBoundary } from "@/shared/lib/ErrorBoundary";
 
 export function NotificationsPage() {
   const [isRead, setIsRead] = useState("");
@@ -40,16 +41,20 @@ export function NotificationsPage() {
           Прочитать всё
         </Button>
       </div>
-      <NotificationFilters isRead={isRead} onChange={handleFilterChange} />
-      <NotificationList
-        data={data}
-        isLoading={isLoading}
-        isError={isError}
-        page={page}
-        onPageChange={setPage}
-        onRetry={refetch}
-        onRead={readNotification.mutate}
-      />
+      <WidgetErrorBoundary name="notification-filters">
+        <NotificationFilters isRead={isRead} onChange={handleFilterChange} />
+      </WidgetErrorBoundary>
+      <WidgetErrorBoundary name="notification-list">
+        <NotificationList
+          data={data}
+          isLoading={isLoading}
+          isError={isError}
+          page={page}
+          onPageChange={setPage}
+          onRetry={refetch}
+          onRead={readNotification.mutate}
+        />
+      </WidgetErrorBoundary>
     </div>
   );
 }

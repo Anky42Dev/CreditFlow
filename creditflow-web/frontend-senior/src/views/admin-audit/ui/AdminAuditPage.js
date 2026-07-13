@@ -9,6 +9,7 @@ import { useUrlFilters } from "@/shared/lib/useUrlFilters";
 import { AuditFilters } from "@/widgets/admin-audit-table/ui/AuditFilters";
 import { RowListSkeleton } from "@/shared/ui/Skeleton";
 import { DetailSkeleton } from "@/shared/ui/Skeleton";
+import { WidgetErrorBoundary } from "@/shared/lib/ErrorBoundary";
 
 const AuditTable = dynamic(() => import("@/widgets/admin-audit-table/ui/AuditTable"), {
   loading: () => <RowListSkeleton />,
@@ -26,15 +27,19 @@ function AdminAuditPageInner() {
   return (
     <div className="space-y-6">
       <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">Аудит-лог</h1>
-      <AuditFilters filters={filters} onFieldChange={setField} />
-      <AuditTable
-        data={data}
-        isLoading={isLoading}
-        isError={isError}
-        onRetry={refetch}
-        page={page}
-        onPageChange={setPage}
-      />
+      <WidgetErrorBoundary name="admin-audit-filters">
+        <AuditFilters filters={filters} onFieldChange={setField} />
+      </WidgetErrorBoundary>
+      <WidgetErrorBoundary name="admin-audit-table">
+        <AuditTable
+          data={data}
+          isLoading={isLoading}
+          isError={isError}
+          onRetry={refetch}
+          page={page}
+          onPageChange={setPage}
+        />
+      </WidgetErrorBoundary>
     </div>
   );
 }

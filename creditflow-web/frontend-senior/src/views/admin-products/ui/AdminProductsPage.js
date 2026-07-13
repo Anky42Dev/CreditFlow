@@ -9,6 +9,7 @@ import { useAdminProducts, useDeactivateAdminProduct } from "@/entities/product/
 import { ProductsTable } from "@/widgets/admin-products-table/ui/ProductsTable";
 import { Button } from "@/shared/ui/Button";
 import { DetailSkeleton } from "@/shared/ui/Skeleton";
+import { WidgetErrorBoundary } from "@/shared/lib/ErrorBoundary";
 
 const ProductFormModal = dynamic(() => import("@/widgets/admin-products-table/ui/ProductFormModal"), {
   loading: () => <DetailSkeleton />,
@@ -54,23 +55,27 @@ export function AdminProductsPage() {
         </h1>
         <Button onClick={openCreate}>Создать продукт</Button>
       </div>
-      <ProductsTable
-        data={data}
-        isLoading={isLoading}
-        isError={isError}
-        onRetry={refetch}
-        page={page}
-        onPageChange={setPage}
-        onEdit={openEdit}
-        onDeactivate={onDeactivate}
-        deactivatingId={deactivateProduct.isPending ? deactivateProduct.variables : null}
-      />
-      {modalOpen && (
-        <ProductFormModal
-          open={modalOpen}
-          onClose={() => setModalOpen(false)}
-          product={editingProduct}
+      <WidgetErrorBoundary name="admin-products-table">
+        <ProductsTable
+          data={data}
+          isLoading={isLoading}
+          isError={isError}
+          onRetry={refetch}
+          page={page}
+          onPageChange={setPage}
+          onEdit={openEdit}
+          onDeactivate={onDeactivate}
+          deactivatingId={deactivateProduct.isPending ? deactivateProduct.variables : null}
         />
+      </WidgetErrorBoundary>
+      {modalOpen && (
+        <WidgetErrorBoundary name="admin-product-form-modal">
+          <ProductFormModal
+            open={modalOpen}
+            onClose={() => setModalOpen(false)}
+            product={editingProduct}
+          />
+        </WidgetErrorBoundary>
       )}
     </div>
   );

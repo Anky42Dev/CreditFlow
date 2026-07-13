@@ -7,6 +7,7 @@ import { useWSEvents } from "@/app/providers/useWSEvents";
 import { Sidebar } from "@/widgets/sidebar/ui/Sidebar";
 import { Header } from "@/widgets/header/ui/Header";
 import { Loader } from "@/shared/ui/Loader";
+import { RouteErrorBoundary } from "@/shared/lib/ErrorBoundary";
 
 export default function DashboardLayout({ children }) {
   const { user, isLoading } = useAuth();
@@ -27,7 +28,9 @@ export default function DashboardLayout({ children }) {
       <Sidebar open={sidebarOpen} onClose={() => setSidebarOpen(false)} />
       <div className="flex flex-1 flex-col">
         <Header onMenuClick={() => setSidebarOpen(true)} />
-        <main className="flex-1 p-6">{children}</main>
+        <main className="flex-1 p-6">
+          <RouteErrorBoundary>{children}</RouteErrorBoundary>
+        </main>
       </div>
     </div>
   );

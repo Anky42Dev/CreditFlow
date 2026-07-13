@@ -6,6 +6,7 @@ import { useUrlFilters } from "@/shared/lib/useUrlFilters";
 import { ApplicationsFilters } from "@/widgets/admin-application-table/ui/ApplicationsFilters";
 import { InfiniteApplicationsList } from "@/widgets/admin-application-table/ui/InfiniteApplicationsList";
 import { RowListSkeleton } from "@/shared/ui/Skeleton";
+import { WidgetErrorBoundary } from "@/shared/lib/ErrorBoundary";
 
 const TABS = [
   { key: "all", label: "Все заявки" },
@@ -53,18 +54,24 @@ function AdminApplicationsPageInner() {
           </button>
         ))}
       </div>
-      {!isQueue && <ApplicationsFilters filters={filters} onFieldChange={setField} />}
-      <InfiniteApplicationsList
-        items={items}
-        isLoading={isLoading}
-        isError={isError}
-        onRetry={refetch}
-        hasNextPage={hasNextPage}
-        isFetchingNextPage={isFetchingNextPage}
-        fetchNextPage={fetchNextPage}
-        showWaiting={isQueue}
-        emptyTitle={isQueue ? "Очередь пуста" : "Заявок не найдено"}
-      />
+      {!isQueue && (
+        <WidgetErrorBoundary name="admin-applications-filters">
+          <ApplicationsFilters filters={filters} onFieldChange={setField} />
+        </WidgetErrorBoundary>
+      )}
+      <WidgetErrorBoundary name="admin-applications-list">
+        <InfiniteApplicationsList
+          items={items}
+          isLoading={isLoading}
+          isError={isError}
+          onRetry={refetch}
+          hasNextPage={hasNextPage}
+          isFetchingNextPage={isFetchingNextPage}
+          fetchNextPage={fetchNextPage}
+          showWaiting={isQueue}
+          emptyTitle={isQueue ? "Очередь пуста" : "Заявок не найдено"}
+        />
+      </WidgetErrorBoundary>
     </div>
   );
 }
