@@ -1,0 +1,15 @@
+venv/
+__pycache__/
+*.pyc
+.env
+db.sqlite3
+media/
+staticfiles/
+.pytest_cache/
+*.egg-info/
+.coverage
+.ruff_cache/
+htmlcov/
+deploy/nginx/certs/
+deploy/.env.prod
+

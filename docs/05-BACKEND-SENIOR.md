@@ -644,6 +644,8 @@ def test_invalid_transition_rejected():
 | AC-9 | Запрос | любой | trace_id сквозной через все сервисы в Jaeger |
 | AC-10 | БД-реплика недоступна | /health/ready | 503 |
 
+**Статус AC-9 (Этап 8, частично выполнено):** реальный OTLP-коллектор (Jaeger) поднят в `deploy/docker-compose.prod.yml`, `common/tracing.py::configure_tracing()` экспортирует spans через `BatchSpanProcessor`/OTLP — подтверждено живой проверкой (spans от `creditflow-backend-senior` видны в Jaeger API). Однако `trace_id` пробрасывается как кастомное поле outbox-payload (см. §12.3), а не как W3C `traceparent`/OTel span-context, поэтому spans backend-senior → scoring_service → consumer **не объединяются в единый Jaeger-trace** — только по общему `app.trace_id`-тегу вручную. Полное сквозное трейсинг-объединение требует redesign propagation-модели (вне объёма Этапа 8).
+
 **Что считается ошибкой:** бизнес-логика в ORM-моделях или views; прямая публикация событий без outbox (риск потери); refresh без ротации; отсутствие компенсаций в Saga; логирование PII в открытом виде; отсутствие индексов под ключевые запросы; домен, зависящий от Django.
 
 ---

@@ -1,0 +1,137 @@
+name: backend-senior CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "creditflow-backend/backend-senior/**"
+      - ".github/workflows/backend-senior.yml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "creditflow-backend/backend-senior/**"
+
+defaults:
+  run:
+    working-directory: creditflow-backend/backend-senior
+
+env:
+  PYTHON_VERSION: "3.12"  # ASSUMPTION: сверить с реальной версией в Dockerfile
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+          cache-dependency-path: creditflow-backend/backend-senior/requirements-dev.txt
+
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check .
+      - run: black --check .
+
+  test:
+    needs: lint
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: creditflow
+          POSTGRES_PASSWORD: creditflow
+          POSTGRES_DB: creditflow_senior_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U creditflow"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    # Переменные ниже соответствуют реальным config("...") вызовам в config/settings.py,
+    # НЕ единой DATABASE_URL — settings.py читает DB_NAME/DB_USER/DB_PASSWORD/DB_HOST/DB_PORT
+    # по отдельности через python-decouple.
+    env:
+      SECRET_KEY: ci-test-secret-key
+      DEBUG: "False"
+      ALLOWED_HOSTS: "localhost,127.0.0.1"
+      DB_NAME: creditflow_senior_test
+      DB_USER: creditflow
+      DB_PASSWORD: creditflow
+      DB_HOST: localhost
+      DB_PORT: "5432"
+      REDIS_URL: redis://localhost:6379/1
+      CHANNEL_LAYERS_REDIS_URL: redis://localhost:6379/2
+      CELERY_BROKER_URL: redis://localhost:6379/0
+      CELERY_RESULT_BACKEND: redis://localhost:6379/0
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+          cache-dependency-path: creditflow-backend/backend-senior/requirements-dev.txt
+
+      - run: pip install -r requirements-dev.txt
+      - run: python manage.py migrate --noinput
+      # DOC 5 §16/§17: domain-layer unit tests must also pass standalone, without
+      # Django/DB (AC-1). They already run under the same pytest invocation below
+      # since domain/ has no DB fixtures to skip; --cov-fail-under mirrors testing.md's
+      # 80% floor (backend-middle used 70%, raised here per DOC 5 §17 DoD).
+      - run: pytest --cov --cov-report=xml --cov-fail-under=80
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: creditflow-backend/backend-senior/coverage.xml
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v5
+        with:
+          context: creditflow-backend/backend-senior
+          push: false
+          tags: creditflow-backend-senior:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: production
+      # Reviewer, настроенный на этом Environment в настройках репозитория,
+      # даёт manual approval перед запуском job.
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy via docker compose
+        # ASSUMPTION: способ деплоя (SSH/self-hosted runner/registry) не был описан — заглушка.
+        # DOC 5 §15 добавляет scoring/celery-beat/outbox-relay/pgbouncer/rabbitmq/minio/
+        # prometheus/grafana/nginx поверх этого — заглушка обновится по мере Этапов 3-8.
+        run: |
+          echo "docker compose pull && docker compose up -d"
+          echo "docker compose exec -T backend-senior python manage.py migrate --noinput"
+          echo "docker compose exec -T backend-senior python manage.py collectstatic --noinput"

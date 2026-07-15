@@ -1,0 +1,103 @@
+version: "3.9"
+services:
+  web:
+    build: .
+    command: daphne -b 0.0.0.0 -p 8000 config.asgi:application
+    env_file: .env
+    environment:
+      DB_HOST: pgbouncer
+      DB_PORT: "5432"
+      REDIS_URL: redis://redis:6379/1
+      CHANNEL_LAYERS_REDIS_URL: redis://redis:6379/2
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+    depends_on: [pgbouncer, redis]
+    ports: ["8000:8000"]
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ${DB_NAME:-creditflow_senior}
+      POSTGRES_USER: ${DB_USER:-creditflow}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-creditflow}
+    volumes: [pgdata:/var/lib/postgresql/data]
+    ports: ["5432:5432"]
+  pgbouncer:
+    # DOC 5 §14, Roadmap Этап 5 п.14: connection pooling in front of
+    # Postgres — web/celery/saga-worker connect through here, not directly
+    # to `db`. Run migrations directly against `db` (`docker-compose exec db
+    # ...` or DB_HOST=localhost -p 5432 from the host, since `db` also
+    # publishes 5432): transaction-mode pooling doesn't support session-level
+    # features (advisory locks, some prepared-statement paths) that
+    # `migrate` can rely on.
+    image: edoburu/pgbouncer:1.21.0
+    environment:
+      DATABASE_URL: postgres://${DB_USER:-creditflow}:${DB_PASSWORD:-creditflow}@db:5432/${DB_NAME:-creditflow_senior}
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: "200"
+      DEFAULT_POOL_SIZE: "20"
+    depends_on: [db]
+    ports: ["6432:5432"]
+  redis:
+    image: redis:7-alpine
+  rabbitmq:
+    # DOC 5 §8.3, Roadmap Этап 3 п.8: broker for domain events/Saga commands,
+    # kept separate from Celery's own Redis broker.
+    image: rabbitmq:3.13-management-alpine
+    ports: ["5672:5672", "15672:15672"]
+  celery:
+    build: .
+    command: celery -A config worker -l info
+    env_file: .env
+    environment:
+      DB_HOST: pgbouncer
+      DB_PORT: "5432"
+      REDIS_URL: redis://redis:6379/1
+      CHANNEL_LAYERS_REDIS_URL: redis://redis:6379/2
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      EVENT_BROKER_URL: amqp://guest:guest@rabbitmq:5672//
+    depends_on: [pgbouncer, redis, rabbitmq]
+  celery-beat:
+    build: .
+    command: celery -A config beat -l info
+    env_file: .env
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+    depends_on: [redis]
+  saga-worker:
+    # Roadmap Этап 3 п.9, Этап 4 п.11: consumes ApplicationApproved (runs
+    # LoanIssuanceSaga) and ScoringCompleted (published by `scoring-consumer`,
+    # applies the decision via ApplyScoringResultUseCase) from RabbitMQ.
+    # Independent of the Celery worker (kombu consumer loop, not a Celery
+    # task) — see apps/outbox/management/commands/consume_events.py.
+    build: .
+    command: python manage.py consume_events
+    env_file: .env
+    environment:
+      DB_HOST: pgbouncer
+      DB_PORT: "5432"
+      EVENT_BROKER_URL: amqp://guest:guest@rabbitmq:5672//
+    depends_on: [pgbouncer, rabbitmq]
+  scoring:
+    # DOC 5 §7: standalone FastAPI scoring service — own image/deps (no
+    # Django), own release cycle, independently scalable. HTTP /score+/health
+    # only; ApplicationSubmitted->ScoringCompleted runs in `scoring-consumer`
+    # below, not in this process.
+    build:
+      context: .
+      dockerfile: scoring_service/Dockerfile
+    ports: ["9000:9000"]
+  scoring-consumer:
+    # Roadmap Этап 4 п.11: consumes ApplicationSubmitted, computes a decision
+    # via scoring_service's ScoringEngine, publishes ScoringCompleted for
+    # `saga-worker` (above) to apply back to the CreditApplication.
+    build:
+      context: .
+      dockerfile: scoring_service/Dockerfile
+    command: python -m scoring_service.consumers.application_submitted
+    environment:
+      EVENT_BROKER_URL: amqp://guest:guest@rabbitmq:5672//
+    depends_on: [rabbitmq]
+volumes:
+  pgdata:

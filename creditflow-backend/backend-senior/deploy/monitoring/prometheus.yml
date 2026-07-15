@@ -1,0 +1,25 @@
+# DOC 5 §12.1, §15.1, Roadmap Этап 8 п.20: scrapes the Django /metrics
+# endpoint (common/metrics.py) exposing cf_applications_submitted_total,
+# cf_scoring_duration_seconds, cf_loans_disbursed_amount_total,
+# cf_http_request_duration_seconds.
+#
+# scoring_service (FastAPI) has no /metrics endpoint of its own — every
+# metric above is recorded in backend-senior (submission-to-decision
+# timing included), so there is nothing to scrape there yet. Add a target
+# here if scoring_service grows its own metrics later.
+
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: creditflow-web
+    metrics_path: /metrics
+    # Counters/histograms are cumulative per-process, not shared across `web`
+    # replicas — a static hostname target only round-trips to whichever
+    # replica Docker's DNS answers with per scrape, so per-replica numbers
+    # will look inconsistent under `--scale web=N`. Fine for this exercise;
+    # a real multi-replica setup should scrape each replica by its
+    # container IP (dns_sd_configs/file_sd) and let Prometheus sum across
+    # instances, rather than relying on one shared hostname.
+    static_configs:
+      - targets: ["web:8000"]
