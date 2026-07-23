@@ -12,7 +12,7 @@ services:
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
     depends_on: [pgbouncer, redis]
-    ports: ["8000:8000"]
+    ports: ["${WEB_PORT:-8000}:8000"]
   db:
     image: postgres:16
     environment:
@@ -20,7 +20,7 @@ services:
       POSTGRES_USER: ${DB_USER:-creditflow}
       POSTGRES_PASSWORD: ${DB_PASSWORD:-creditflow}
     volumes: [pgdata:/var/lib/postgresql/data]
-    ports: ["5432:5432"]
+    ports: ["${DB_PORT_HOST:-5432}:5432"]
   pgbouncer:
     # DOC 5 §14, Roadmap Этап 5 п.14: connection pooling in front of
     # Postgres — web/celery/saga-worker connect through here, not directly
@@ -29,24 +29,48 @@ services:
     # publishes 5432): transaction-mode pooling doesn't support session-level
     # features (advisory locks, some prepared-statement paths) that
     # `migrate` can rely on.
-    image: edoburu/pgbouncer:1.21.0
+    # edoburu/pgbouncer:1.21.0 does not exist on Docker Hub (only -pN
+    # suffixed tags do) — pin a tag that's actually published.
+    image: edoburu/pgbouncer:1.21.0-p2
     environment:
       DATABASE_URL: postgres://${DB_USER:-creditflow}:${DB_PASSWORD:-creditflow}@db:5432/${DB_NAME:-creditflow_senior}
       POOL_MODE: transaction
       MAX_CLIENT_CONN: "200"
       DEFAULT_POOL_SIZE: "20"
+      # postgres:16 defaults password_encryption to scram-sha-256; this
+      # image's entrypoint defaults AUTH_TYPE to md5, which makes the
+      # pgbouncer->postgres backend connection fail with "cannot do SCRAM
+      # authentication: wrong password type".
+      AUTH_TYPE: scram-sha-256
     depends_on: [db]
-    ports: ["6432:5432"]
+    ports: ["${PGBOUNCER_PORT:-6432}:5432"]
   redis:
     image: redis:7-alpine
   rabbitmq:
     # DOC 5 §8.3, Roadmap Этап 3 п.8: broker for domain events/Saga commands,
     # kept separate from Celery's own Redis broker.
     image: rabbitmq:3.13-management-alpine
-    ports: ["5672:5672", "15672:15672"]
+    ports: ["${RABBITMQ_PORT:-5672}:5672", "${RABBITMQ_MGMT_PORT:-15672}:15672"]
+    # rabbitmq takes several seconds to actually start listening after the
+    # container starts; without this, celery/saga-worker/scoring-consumer
+    # (depends_on: rabbitmq) connect before it's ready and crash on boot
+    # instead of waiting.
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
   celery:
     build: .
-    command: celery -A config worker -l info
+    # CELERY_TASK_ROUTES (config/settings.py) routes tasks to named queues
+    # (scoring, outbox, email, schedule) instead of the "celery" default —
+    # deploy/docker-compose.prod.yml splits those across dedicated workers
+    # via -Q. This single dev worker must listen on all of them explicitly,
+    # or score_application/relay_outbox_messages/send_email_async/
+    # mark_overdue_payments never get consumed (they pile up unprocessed in
+    # their Redis list forever — applications stuck at SUBMITTED, outbox
+    # never drained to the broker, no scoring_service/saga integration).
+    command: celery -A config worker -l info -Q celery,scoring,outbox,email,schedule
     env_file: .env
     environment:
       DB_HOST: pgbouncer
@@ -56,7 +80,13 @@ services:
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
       EVENT_BROKER_URL: amqp://guest:guest@rabbitmq:5672//
-    depends_on: [pgbouncer, redis, rabbitmq]
+    depends_on:
+      pgbouncer:
+        condition: service_started
+      redis:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
   celery-beat:
     build: .
     command: celery -A config beat -l info
@@ -78,7 +108,11 @@ services:
       DB_HOST: pgbouncer
       DB_PORT: "5432"
       EVENT_BROKER_URL: amqp://guest:guest@rabbitmq:5672//
-    depends_on: [pgbouncer, rabbitmq]
+    depends_on:
+      pgbouncer:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
   scoring:
     # DOC 5 §7: standalone FastAPI scoring service — own image/deps (no
     # Django), own release cycle, independently scalable. HTTP /score+/health
@@ -87,7 +121,7 @@ services:
     build:
       context: .
       dockerfile: scoring_service/Dockerfile
-    ports: ["9000:9000"]
+    ports: ["${SCORING_PORT:-9000}:9000"]
   scoring-consumer:
     # Roadmap Этап 4 п.11: consumes ApplicationSubmitted, computes a decision
     # via scoring_service's ScoringEngine, publishes ScoringCompleted for
@@ -98,6 +132,8 @@ services:
     command: python -m scoring_service.consumers.application_submitted
     environment:
       EVENT_BROKER_URL: amqp://guest:guest@rabbitmq:5672//
-    depends_on: [rabbitmq]
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
 volumes:
   pgdata:
