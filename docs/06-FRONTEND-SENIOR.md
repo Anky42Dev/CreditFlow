@@ -359,7 +359,7 @@ stage: deploy
 | `GET/POST /credit-applications` | `/applications`, feature submit |
 | `GET/PUT/DELETE /credit-applications/{id}` | `/applications/[id]` |
 | `POST /credit-applications/{id}/submit` | feature submit-application |
-| `GET /loans`, `/loans/{id}`, `/schedule` | `/loans`, `/loans/[id]` |
+| `GET /loans`, `/loans/{id}` | `/loans`, `/loans/[id]` (график платежей и транзакции приходят вложенными в тело `Loan` — `schedule_items`/`transactions` — отдельного `/schedule`-эндпоинта на Senior нет, в отличие от матрицы DOC 0 §7) |
 | `POST /loans/{id}/repay` | feature repay-loan |
 | `GET /notifications`, `/unread-count` | notification-bell, `/notifications` |
 | `POST /notifications/{id}/read`, `/read-all` | feature mark-read |
@@ -378,7 +378,7 @@ stage: deploy
 - 404 → страница/EmptyState «Не найдено».
 - 429 → toast с `Retry-After`, блокировка кнопки на время.
 - 500/сеть → ErrorBoundary/ErrorState + retry, событие в мониторинг.
-- WS-разрыв → экспоненциальный реконнект, индикатор «переподключение».
+- WS-разрыв → экспоненциальный реконнект, индикатор «переподключение». Channel layer (`group_send`) ничего не буферизует и не реплеит: события, отправленные, пока клиент отключён (в т.ч. на время реконнекта), теряются безвозвратно — после каждого успешного (пере)подключения фронт обязан дёргать `GET /notifications` (и при необходимости обновлять статус текущей заявки через `GET /credit-applications/{id}`), а не полагаться на то, что WS дошлёт пропущенное.
 
 ---
 
